@@ -3,6 +3,7 @@ name = "pallet-builder"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "Andrew Gibson", email = "gibson.ar@gmail.com" }
 ]
