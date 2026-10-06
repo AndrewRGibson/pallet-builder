@@ -1,4 +1,12 @@
-from pallet_builder import STANDARD_PALLETS, Case, Pallet, convert_length, maximize_case_count, optimize_layout, solve_pallet_layout
+from pallet_builder import (
+    STANDARD_PALLETS,
+    Case,
+    Pallet,
+    convert_length,
+    maximize_case_count,
+    optimize_layout,
+    solve_pallet_layout,
+)
 
 
 def test_layout_fits_basic_pallet():
@@ -256,3 +264,44 @@ def test_standard_pallet_aliases_resolve_without_duplicate_presets():
     assert Pallet.from_standard("EURO", unit="mm").length == 1200
     assert Pallet.from_standard("eur_1200x800", unit="mm").width == 800
     assert sorted(STANDARD_PALLETS) == ["CHEP", "EUR_1000X1200", "EUR_1200X800", "GMA"]
+
+
+def _assert_valid_layer(pallet, placements):
+    for p in placements:
+        assert p.x >= -1e-9 and p.y >= -1e-9
+        assert p.x + p.length <= pallet.length + 1e-6 and p.y + p.width <= pallet.width + 1e-6
+    for i, a in enumerate(placements):
+        for b in placements[i + 1 :]:
+            assert (
+                a.x + a.length <= b.x + 1e-6
+                or b.x + b.length <= a.x + 1e-6
+                or a.y + a.width <= b.y + 1e-6
+                or b.y + b.width <= a.y + 1e-6
+            ), (a, b)
+
+
+def test_block_packer_finds_full_grid_that_greedy_missed():
+    chep = Pallet.from_standard("CHEP")
+
+    assert maximize_case_count(chep, Case("A", 8, 5, 5))[0] == 48
+    assert maximize_case_count(chep, Case("B", 12, 10, 8))[0] == 16
+    assert maximize_case_count(chep, Case("C", 11, 9, 5))[0] >= 18
+
+
+def test_layers_never_overlap_or_leave_the_deck_across_case_sizes():
+    chep = Pallet.from_standard("CHEP")
+    for length in range(3, 20, 2):
+        for width in range(3, length + 1, 2):
+            count, result = maximize_case_count(chep, Case("S", length, width, 5))
+            assert count == len(result.placements)
+            _assert_valid_layer(chep, result.placements)
+
+
+def test_partial_load_is_valid_and_reports_unplaced_cases():
+    pallet = Pallet(length=40, width=48, unit="in")
+    result = solve_pallet_layout(pallet, [Case("P", 8, 5, 5, quantity=50)])
+
+    assert not result.feasible
+    assert len(result.placements) == 48
+    assert len([v for v in result.violations if "No feasible footprint" in v]) == 2
+    _assert_valid_layer(pallet, result.placements)

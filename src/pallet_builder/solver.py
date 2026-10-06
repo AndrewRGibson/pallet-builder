@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import random
+from bisect import bisect_right
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from itertools import permutations
-from typing import Iterable, Sequence
-
 
 _UNIT_TO_METERS = {
     "mm": 0.001,
@@ -131,7 +132,7 @@ class Pallet:
         normalize_unit(self.unit)
 
     @classmethod
-    def from_standard(cls, name: str, *, unit: str = "in", max_load_height: float | None = None) -> "Pallet":
+    def from_standard(cls, name: str, *, unit: str = "in", max_load_height: float | None = None) -> Pallet:
         key = str(name).upper()
         key = _STANDARD_PALLET_ALIASES.get(key, key)
         if key not in _STANDARD_PALLETS:
@@ -294,7 +295,151 @@ def _positions_for_orientations(
     return positions
 
 
+# Above this many (x, y) normal-position states the recursive guillotine search gets slow in pure
+# Python, so the block packer falls back to one-cut (two-block) patterns.
+_MAX_GUILLOTINE_STATES = 6000
+_UNLIMITED_CUTS = -1
+_GREEDY_FALLBACK_MAX_CASES = 400
+
+
+def _normal_positions(limit: float, sizes: Sequence[float]) -> list[float]:
+    """All offsets reachable as non-negative integer combinations of ``sizes`` (normal patterns)."""
+    positions = {0.0}
+    frontier = [0.0]
+    while frontier:
+        start = frontier.pop()
+        for size in sizes:
+            nxt = round(start + size, 9)
+            if nxt <= limit + 1e-9 and nxt not in positions:
+                positions.add(nxt)
+                frontier.append(nxt)
+    return sorted(positions)
+
+
+@lru_cache(maxsize=64)
+def _block_layout(
+    length: float,
+    width: float,
+    footprints: tuple[tuple[float, float], ...],
+) -> tuple[tuple[float, float, int], ...]:
+    """Best guillotine layout of identical rectangles, as (x, y, footprint index) tuples.
+
+    Each region is either filled with a uniform grid of one footprint or cut in two at a normal
+    position and both halves solved recursively. This finds the classic block patterns (e.g. a
+    5x8 case on a 40x48 deck: 48, where the greedy packer manages 45).
+    """
+    xs = _normal_positions(length, [fp[0] for fp in footprints])
+    ys = _normal_positions(width, [fp[1] for fp in footprints])
+    max_cuts = _UNLIMITED_CUTS if len(xs) * len(ys) <= _MAX_GUILLOTINE_STATES else 1
+    memo: dict[tuple[float, float, int], tuple[int, tuple]] = {}
+
+    def snap(value: float, positions: list[float]) -> float:
+        # A region's best layout only depends on the largest normal size that fits inside it.
+        return positions[bisect_right(positions, value + 1e-9) - 1]
+
+    def solve(region_l: float, region_w: float, cuts: int) -> tuple[int, tuple]:
+        region_l, region_w = snap(region_l, xs), snap(region_w, ys)
+        key = (region_l, region_w, cuts)
+        if key in memo:
+            return memo[key]
+
+        best: tuple[int, tuple] = (0, ("empty",))
+        for index, (fp_l, fp_w) in enumerate(footprints):
+            count = int((region_l + 1e-9) // fp_l) * int((region_w + 1e-9) // fp_w)
+            if count > best[0]:
+                best = (count, ("grid", index))
+
+        if cuts != 0:
+            sub_cuts = cuts if cuts == _UNLIMITED_CUTS else cuts - 1
+            for x in xs:
+                if x >= region_l - 1e-9:
+                    break
+                if x > 0:
+                    count = solve(x, region_w, sub_cuts)[0] + solve(region_l - x, region_w, sub_cuts)[0]
+                    if count > best[0]:
+                        best = (count, ("v", x, sub_cuts))
+            for y in ys:
+                if y >= region_w - 1e-9:
+                    break
+                if y > 0:
+                    count = solve(region_l, y, sub_cuts)[0] + solve(region_l, region_w - y, sub_cuts)[0]
+                    if count > best[0]:
+                        best = (count, ("h", y, sub_cuts))
+
+        memo[key] = best
+        return best
+
+    spots: list[tuple[float, float, int]] = []
+
+    def build(x0: float, y0: float, region_l: float, region_w: float, cuts: int) -> None:
+        _, plan = solve(region_l, region_w, cuts)
+        if plan[0] == "grid":
+            fp_l, fp_w = footprints[plan[1]]
+            for i in range(int((region_l + 1e-9) // fp_l)):
+                for j in range(int((region_w + 1e-9) // fp_w)):
+                    spots.append((round(x0 + i * fp_l, 9), round(y0 + j * fp_w, 9), plan[1]))
+        elif plan[0] == "v":
+            build(x0, y0, plan[1], region_w, plan[2])
+            build(x0 + plan[1], y0, region_l - plan[1], region_w, plan[2])
+        elif plan[0] == "h":
+            build(x0, y0, region_l, plan[1], plan[2])
+            build(x0, y0 + plan[1], region_l, region_w - plan[1], plan[2])
+
+    build(0.0, 0.0, length, width, max_cuts)
+    # Fill from the origin outward so a partial load (fewer cases than fit) stays compact.
+    return tuple(sorted(spots, key=lambda spot: (spot[1], spot[0])))
+
+
+def _pack_single_type(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
+    case = cases[0]
+    orientations = _orientations_for(case)
+    within_height = orientations
+    if pallet.height is not None:
+        within_height = [o for o in orientations if case.oriented_dimensions(o)[2] <= pallet.height + 1e-9]
+
+    spots: tuple[tuple[float, float, int], ...] = ()
+    # Prefer orientations under the height limit; if none of them fit, fall back to all of them so
+    # the height check reports the real reason instead of a footprint error.
+    for candidates in (within_height, orientations):
+        footprints: list[tuple[float, float]] = []
+        footprint_orientations: list[tuple[int, int, int]] = []
+        for orientation in candidates:
+            length, width, _ = case.oriented_dimensions(orientation)
+            footprint = (round(length, 9), round(width, 9))
+            if footprint not in footprints:
+                footprints.append(footprint)
+                footprint_orientations.append(orientation)
+        if footprints:
+            spots = _block_layout(round(pallet.length, 9), round(pallet.width, 9), tuple(footprints))
+        if spots:
+            break
+
+    placements = []
+    for (x, y, index), item in zip(spots, cases):
+        orientation = footprint_orientations[index]
+        length, width, height = item.oriented_dimensions(orientation)
+        placements.append(Placement(item.name, x, y, 0.0, length, width, height, orientation))
+
+    if not placements:
+        return [], 0.0, ["No cases could be placed on the pallet."]
+    violations = [f"No feasible footprint for case {item.name!r} on the pallet." for item in cases[len(placements):]]
+    used_area = sum(placement.length * placement.width for placement in placements)
+    return placements, used_area / pallet.plan_area, violations
+
+
 def _pack_layer(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
+    if cases and _single_case_type(cases):
+        block = _pack_single_type(pallet, cases)
+        # The greedy packer can occasionally find a non-guillotine layout that beats the block
+        # packer, but it is O(n^2), so only try it on modest loads.
+        if len(block[0]) == len(cases) or len(cases) > _GREEDY_FALLBACK_MAX_CASES:
+            return block
+        greedy = _pack_greedy(pallet, cases)
+        return greedy if len(greedy[0]) > len(block[0]) else block
+    return _pack_greedy(pallet, cases)
+
+
+def _pack_greedy(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
     free_rectangles: list[tuple[float, float, float, float]] = [(0.0, 0.0, pallet.length, pallet.width)]
     placements: list[Placement] = []
     used_area = 0.0
@@ -304,7 +449,6 @@ def _pack_layer(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement],
         candidate: tuple[float, float, float, float, tuple[int, int, int]] | None = None
         for position in _candidate_positions(case, free_rectangles, pallet.height):
             x, y, length, width, orientation = position
-            waste = (pallet.length * pallet.width) - (length * width)
             if candidate is None or (length * width) > (candidate[2] * candidate[3]):
                 candidate = (x, y, length, width, orientation)
         if candidate is None:
