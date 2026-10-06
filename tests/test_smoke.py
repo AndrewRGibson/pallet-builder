@@ -1,4 +1,4 @@
-from pallet_builder import Case, Pallet, convert_length, maximize_case_count, optimize_layout, solve_pallet_layout
+from pallet_builder import STANDARD_PALLETS, Case, Pallet, convert_length, maximize_case_count, optimize_layout, solve_pallet_layout
 
 
 def test_layout_fits_basic_pallet():
@@ -34,7 +34,8 @@ def test_standard_profile_includes_chep_and_metric_equivalents():
     chep = Pallet.from_standard("CHEP", unit="in")
     assert chep.length == 40
     assert chep.width == 48
-    assert chep.height == 6
+    assert chep.deck_height == 6
+    assert chep.height is None
     assert chep.max_weight == 2200
 
     eur = Pallet.from_standard("EUR_1200x800", unit="mm")
@@ -137,8 +138,8 @@ def test_optimization_matches_baseline_for_repeated_case_types():
     per_size_cases = [
         [Case(f"C{i}", 2, 2, 2, weight=1, unit="in") for i in range(12)],
         [Case(f"C{i}", 4, 4, 2, weight=2, unit="in") for i in range(10)],
-        [Case(f"C{i}", 6, 6, 2, weight=3, unit="in") for i in range(5)],
-        [Case(f"C{i}", 8, 8, 2, weight=4, unit="in") for i in range(3)],
+        [Case(f"C{i}", 6, 6, 2, weight=3, unit="in") for i in range(3)],
+        [Case(f"C{i}", 8, 8, 2, weight=4, unit="in") for i in range(2)],
     ]
 
     for cases in per_size_cases:
@@ -160,6 +161,17 @@ def test_maximize_case_count_for_single_type():
     assert len(result.placements) == 10
 
 
+def test_maximize_case_count_handles_single_positive_fit_without_zero_quantity_search():
+    pallet = Pallet(length=10, width=8, height=5, unit="in", max_weight=2000)
+    case = Case("A", 9, 5, 2, weight=100, unit="in")
+
+    max_count, result = maximize_case_count(pallet, case)
+
+    assert max_count == 1
+    assert result.feasible
+    assert len(result.placements) == 1
+
+
 def test_mixed_case_geometry_rejected_with_clear_reason():
     pallet = Pallet(length=12, width=8, height=5, max_weight=1000)
     mixed_cases = [
@@ -175,3 +187,72 @@ def test_mixed_case_geometry_rejected_with_clear_reason():
     assert not optimized.feasible
     assert "single case type" in " ".join(result.violations).lower()
     assert "single case type" in " ".join(optimized.violations).lower()
+
+
+def test_preset_deck_height_does_not_limit_case_height():
+    chep = Pallet.from_standard("CHEP", unit="in")
+    max_count, result = maximize_case_count(chep, Case("T", 12, 10, 8, weight=10))
+
+    assert max_count > 0
+    assert result.feasible
+
+    capped = Pallet.from_standard("CHEP", unit="in", max_load_height=6)
+    max_count, result = maximize_case_count(capped, Case("T", 12, 10, 8, weight=10))
+
+    assert max_count == 0
+    assert "height" in " ".join(result.violations).lower()
+
+
+def test_this_side_up_cases_are_never_tipped():
+    pallet = Pallet(length=10, width=10, height=5, unit="in")
+    result = solve_pallet_layout(pallet, [Case("F", 12, 4, 2)])
+
+    assert not result.feasible
+    assert all(placement.orientation[2] == 2 for placement in result.placements)
+
+
+def test_tipped_case_reports_its_oriented_height():
+    pallet = Pallet(length=10, width=10, height=20, unit="in")
+    result = solve_pallet_layout(pallet, [Case("F", 12, 4, 2, this_side_up=False)])
+
+    assert result.feasible
+    (placement,) = result.placements
+    assert {placement.length, placement.width, placement.height} == {12, 4, 2}
+    assert placement.length <= 10 and placement.width <= 10
+
+    # Every orientation that fits a 10x10 deck stands the 12" side up, so a 5" cap rules it out.
+    short_pallet = Pallet(length=10, width=10, height=5, unit="in")
+    result = solve_pallet_layout(short_pallet, [Case("F", 12, 4, 2, this_side_up=False)])
+    assert not result.feasible
+    assert "height" in " ".join(result.violations).lower()
+
+
+def test_tippable_case_prefers_orientation_within_height_limit():
+    pallet = Pallet(length=20, width=20, height=5, unit="in")
+    result = solve_pallet_layout(pallet, [Case("L", 4, 4, 10, this_side_up=False)])
+
+    assert result.feasible
+    assert result.placements[0].height == 4
+
+
+def test_maximize_case_count_considers_rotated_footprint():
+    pallet = Pallet(length=40, width=48, unit="in")
+    max_count, result = maximize_case_count(pallet, Case("R", 45, 10, 5))
+
+    assert max_count == 4
+    assert result.feasible
+    assert all(placement.length == 10 and placement.width == 45 for placement in result.placements)
+
+
+def test_optimize_does_not_hide_load_violations():
+    pallet = Pallet(length=10, width=10, height=5, max_weight=5)
+    result = solve_pallet_layout(pallet, [Case("W", 5, 5, 2, weight=10, quantity=2)], optimize=True)
+
+    assert not result.feasible
+    assert "weight" in " ".join(result.violations).lower()
+
+
+def test_standard_pallet_aliases_resolve_without_duplicate_presets():
+    assert Pallet.from_standard("EURO", unit="mm").length == 1200
+    assert Pallet.from_standard("eur_1200x800", unit="mm").width == 800
+    assert sorted(STANDARD_PALLETS) == ["CHEP", "EUR_1000X1200", "EUR_1200X800", "GMA"]

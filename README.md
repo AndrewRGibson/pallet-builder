@@ -223,13 +223,13 @@ Run it with:
 uv run streamlit run app.py
 ```
 
-The app supports:
+The app re-solves as inputs change. The sidebar holds every input that affects the solve:
 
-- standard pallet presets or custom pallet dimensions
-- single case-type input with quantity
-- automatic layout solving
-- utilization and feasibility feedback
-- a plan-view visualization of the pallet footprint
+- **Pallet**: preset (CHEP, GMA, EUR 1200×800, EUR 1000×1200) or custom dimensions, length and weight units, max load height, max weight, plus max volume, max plan area and deck height under "More limits". Setting a limit to 0 means no limit.
+- **Case**: length, width, height, weight and unit, plus *This side up*. Turning *This side up* off lets the solver tip cases.
+- **Solve**: *Max cases* finds the largest count that fits. *Fixed quantity* places a given number of cases and can turn on the GA optimizer (generations, population, seed).
+
+The results page shows the plan view next to the status, case count, deck coverage, load weight and height, and what limits the count. Tabs below give the placement table and a JSON export of the inputs and layout.
 
 ## Summary
 
