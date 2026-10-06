@@ -277,9 +277,10 @@ The app finds the most cases that fit and re-solves whenever an input changes. E
 - **Units**: one system for every length and weight, either US (in, lb) or Metric (cm, kg). Switching converts every value already entered.
 - **Pallet**:
   - Preset (CHEP, GMA, EUR 1200×800, EUR 1000×1200, converted to the active units) or custom dimensions.
-  - Max build height (including the pallet), deck height and max weight.
-  - Max volume and max plan area, under "More limits".
-  - Choosing a preset fills in a typical build height (60 in or 180 cm). Editing a pallet dimension switches the preset to "Custom". A limit of 0 means no limit.
+  - Deck height, and max weight (the pallet's rating).
+  - Choosing a preset fills these in, plus a typical build height (60 in or 180 cm). Editing a pallet dimension switches the preset to "Custom".
+- **Build**: limits for this load that don't depend on the pallet choice: max build height (from the floor, including the pallet), max volume and max plan area.
+- **Optional limits**: a blank field means no limit, and 0 is a real limit. For example, a max weight of 0 means no case fits, and the app explains why.
 - **Case**: length, width, height and weight, plus *This side up*.
 - **Solve**:
   - Stacking: interlock when possible, column, or no column stacking; plus the minimum support.

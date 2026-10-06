@@ -48,9 +48,15 @@ st.markdown(
     <style>
         .block-container { padding-top: 2.75rem; padding-bottom: 0.5rem; }
         section[data-testid="stSidebar"] .block-container { padding-top: 0.6rem; }
-        section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.35rem; }
-        section[data-testid="stSidebar"] hr { margin: 0.4rem 0; }
-        section[data-testid="stSidebar"] { min-width: 330px; }
+        section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.2rem; }
+        /* Clear separation between sidebar sections; rows within a section stay compact. */
+        section[data-testid="stSidebar"] hr { margin: 1.1rem 0 0.6rem; }
+        section[data-testid="stSidebar"] { min-width: 400px; }
+        /* Compact value boxes: shorter inputs and selects with less vertical padding. */
+        section[data-testid="stSidebar"] [data-baseweb="input"],
+        section[data-testid="stSidebar"] [data-baseweb="select"] > div { min-height: 1.85rem; height: 1.85rem; }
+        section[data-testid="stSidebar"] [data-baseweb="input"] input { padding-top: 0.1rem; padding-bottom: 0.1rem; }
+        section[data-testid="stSidebar"] [data-baseweb="select"] > div > div { padding-top: 0; padding-bottom: 0; }
         /* Sidebar properties: label and value on one line. */
         section[data-testid="stSidebar"] [data-testid="stNumberInput"],
         section[data-testid="stSidebar"] [data-testid="stSelectbox"] {
@@ -114,13 +120,17 @@ def _convert_units() -> None:
     """Re-express every entered length and weight in the newly selected unit system."""
     old_length, old_weight = UNIT_SYSTEMS[st.session_state._units_prev]
     new_length, new_weight = _units()
-    for key in _LENGTH_KEYS:
-        st.session_state[key] = _round(convert_length(st.session_state[key], old_length, new_length))
+    def scale(key: str, factor: float) -> None:
+        if st.session_state[key] is not None:  # blank = no limit
+            st.session_state[key] = _round(st.session_state[key] * factor)
+
     factor = convert_length(1.0, old_length, new_length)
-    st.session_state.p_maxvol = _round(st.session_state.p_maxvol * factor**3)
-    st.session_state.p_maxarea = _round(st.session_state.p_maxarea * factor**2)
+    for key in _LENGTH_KEYS:
+        scale(key, factor)
+    scale("p_maxvol", factor**3)
+    scale("p_maxarea", factor**2)
     for key in _WEIGHT_KEYS:
-        st.session_state[key] = _round(st.session_state[key] * WEIGHT_UNITS[old_weight] / WEIGHT_UNITS[new_weight])
+        scale(key, WEIGHT_UNITS[old_weight] / WEIGHT_UNITS[new_weight])
     # Keep the sensitivity step on the round default for the new system unless the user changed it.
     step = st.session_state.sens_step
     if abs(step - DEFAULT_SENS_STEP[old_length]) < 1e-9:
@@ -143,8 +153,8 @@ def _init_state() -> None:
         p_deck=6.0,
         p_height=DEFAULT_BUILD_HEIGHT["in"],
         p_maxw=2200.0,
-        p_maxvol=0.0,
-        p_maxarea=0.0,
+        p_maxvol=None,
+        p_maxarea=None,
         c_len=12.0,
         c_wid=10.0,
         c_hgt=8.0,
@@ -178,6 +188,12 @@ def _section(label: str) -> None:
 
 def _num(label: str, key: str, *, on_change=None, help: str | None = None, min_value: float = 0.0) -> float:
     return st.number_input(label, key=key, min_value=min_value, step=1.0, format="%g", on_change=on_change, help=help)
+
+
+def _limit(label: str, key: str, *, on_change=None, help: str | None = None) -> float | None:
+    """An optional limit: blank means no limit, while 0 is a real (if strict) limit."""
+    return st.number_input(label, key=key, min_value=0.0, value=None, step=1.0, format="%g",
+                           placeholder="No limit", on_change=on_change, help=help)
 
 
 # --- Solving --------------------------------------------------------------------------------
@@ -291,7 +307,7 @@ def _render_3d(pallet: Pallet, result) -> None:
     traces.append(_box_mesh(boxes, colors))
     if draw_edges:
         traces.append(_box_edges(boxes, "#1e3a8a", 1.2))
-    if pallet.height:
+    if pallet.height is not None:
         envelope = [(0.0, 0.0, 0.0, pallet.length, pallet.width, pallet.height)]
         traces.append(_box_edges(envelope, "#ef4444", 2, dash="dash"))
 
@@ -336,27 +352,49 @@ def _solver_rows(result) -> list[dict]:
             "Layers": run.family,
             "Per layer": run.cases_per_layer if run.ran else None,
             "Bound": run.target,
-            "Interlock": f"{run.interlock:.0%}" if run.ran and run.interlock is not None else "",
+            # Percent (0-100) so the Excel export reads naturally too.
+            "Interlock": round(run.interlock * 100, 1) if run.ran and run.interlock is not None else None,
             "Iterations": run.iterations if run.ran else None,
             "Evaluations": run.evaluations if run.ran else None,
             "Time (ms)": round(run.elapsed_ms, 1) if run.ran else None,
-            "Used": "\u2714" if run.selected else "",
+            "Used": run.selected,
             "Note": run.note,
         }
         for run in result.solver_runs
     ]
 
 
+_SOLVER_COLUMNS = {
+    # Pinned so they stay visible while scrolling right; numbers are right-aligned and formatted
+    # consistently per column.
+    "Solver": st.column_config.TextColumn(pinned=True),
+    "Layers": st.column_config.TextColumn(pinned=True),
+    "Per layer": st.column_config.NumberColumn(format="localized", alignment="right"),
+    "Bound": st.column_config.NumberColumn(format="localized", alignment="right"),
+    "Interlock": st.column_config.NumberColumn(format="%.0f%%", alignment="right"),
+    "Iterations": st.column_config.NumberColumn(format="localized", alignment="right"),
+    "Evaluations": st.column_config.NumberColumn(format="localized", alignment="right"),
+    "Time (ms)": st.column_config.NumberColumn(format="%.1f", alignment="right"),
+    "Used": st.column_config.CheckboxColumn(),
+    "Note": st.column_config.TextColumn(),
+}
+
+
 def _render_solver_status(result, solve_ms: float) -> None:
     if not result.solver_runs:
         return
     st.markdown(f"**Solver status** \u00b7 solved in {solve_ms:,.0f} ms")
-    st.dataframe(_solver_rows(result), hide_index=True, width="stretch")
+    st.dataframe(_solver_rows(result), hide_index=True, width="stretch", column_config=_SOLVER_COLUMNS)
     st.caption("Iterations: block packer = region states solved, GA = generations. Evaluations: block packer = "
                "cuts tried, GA = distinct patterns decoded. Times are from the first solve (results are cached).")
 
+
+def _render_iterations(result) -> None:
+    """GA objective (and interlock) by generation."""
     ga_runs = [run for run in result.solver_runs if run.history]
     if not ga_runs:
+        skipped = next((run.note for run in result.solver_runs if run.solver.startswith("Genetic") and not run.ran), "")
+        st.info("The GA didn't run for this solve, so there's no iteration history. " + skipped)
         return
     show_interlock = any(entry[3] > 0 for run in ga_runs for entry in run.history)
     fig = go.Figure()
@@ -379,7 +417,7 @@ def _render_solver_status(result, solve_ms: float) -> None:
     fig.add_hline(y=run.target, line={"color": "#ef4444", "dash": "dash"},
                   annotation_text="bound", annotation_position="top right")
     layout = {
-        "height": 240,
+        "height": 480,
         "margin": {"l": 0, "r": 0, "t": 10, "b": 0},
         "xaxis_title": "Generation",
         "yaxis_title": "Objective",
@@ -522,15 +560,18 @@ with st.sidebar:
                  on_change=_apply_preset)
     _num(f"Length ({p_unit})", "p_len", on_change=_mark_custom, min_value=0.001)
     _num(f"Width ({p_unit})", "p_wid", on_change=_mark_custom, min_value=0.001)
-    _num(f"Max build height ({p_unit})", "p_height",
-         help="Floor to top of load, including the pallet. Sets how many layers stack. "
-              "0 = no limit (single layer).")
     _num(f"Deck height ({p_unit})", "p_deck", on_change=_mark_custom, min_value=0.001,
          help="The pallet's own height; counts toward the max build height.")
-    _num(f"Max weight ({w_unit_label})", "p_maxw", on_change=_mark_custom, help="Total case weight. 0 = no limit.")
-    with st.expander("More limits", expanded=False):
-        _num(f"Max volume ({p_unit}³)", "p_maxvol", help="0 = no limit.")
-        _num(f"Max plan area ({p_unit}²)", "p_maxarea", help="Combined case footprint. 0 = no limit.")
+    _limit(f"Max weight ({w_unit_label})", "p_maxw", on_change=_mark_custom,
+           help="Total case weight the pallet is rated for. Blank = no limit.")
+
+    st.divider()
+    _section("Build")
+    _limit(f"Max build height ({p_unit})", "p_height",
+           help="Floor to top of load, including the pallet. Sets how many layers stack. "
+                "Blank = no limit (a single layer).")
+    _limit(f"Max volume ({p_unit}\u00b3)", "p_maxvol", help="Total case volume. Blank = no limit.")
+    _limit(f"Max plan area ({p_unit}\u00b2)", "p_maxarea", help="Combined case footprint. Blank = no limit.")
 
     st.divider()
     _section("Case")
@@ -579,11 +620,11 @@ min_support = ss.min_support / 100
 pallet_args = {
     "length": ss.p_len,
     "width": ss.p_wid,
-    "height": ss.p_height or None,
+    "height": ss.p_height,
     "unit": p_unit,
-    "max_weight": ss.p_maxw or None,
-    "max_volume": ss.p_maxvol or None,
-    "max_plan_area": ss.p_maxarea or None,
+    "max_weight": ss.p_maxw,
+    "max_volume": ss.p_maxvol,
+    "max_plan_area": ss.p_maxarea,
     "deck_height": ss.p_deck,
     "name": None if ss.preset == CUSTOM else ss.preset,
 }
@@ -625,66 +666,6 @@ st.caption(
     f"case {ss.c_len:g}×{ss.c_wid:g}×{ss.c_hgt:g} {p_unit}"
 )
 
-view_col, info_col = st.columns(2, gap="large")
-with view_col:
-    if result.placements:
-        _render_3d(pallet, result)
-    else:
-        st.info("Nothing to draw. Adjust the inputs in the sidebar.")
-
-with info_col:
-    limit_text = (
-        f"Limit {pallet.height:g} {unit} (deck {pallet.deck_height or 0:g} + load {pallet.load_height_limit:g})"
-        if pallet.height else "No build height limit"
-    )
-    m1, m2 = st.columns(2)
-    m1.metric("Cases", count)
-    m2.metric("Malleable bound", result.volume_bound,
-              help="Cases that would fit if they were perfectly malleable: the space above the deck up to "
-                   "the build height divided by case volume. Ignores weight and other limits.")
-    m1.metric("Layers", f"{result.layers} × {result.cases_per_layer}" if count else "0",
-              help=f"Layers × cases per layer. Up to {result.max_layers} layers fit the build height.")
-    m2.metric("Cube use", f"{result.volume_utilization:.1%}" if pallet.height else "–",
-              help="Case volume as a share of the space above the deck up to the max build height.")
-    m1.metric("Deck coverage", f"{result.utilization:.1%}", help="Share of the deck covered by the base layer.")
-    m2.metric(
-        "Load weight",
-        f"{placed_weight:,.1f} {w_unit}",
-        help=f"Limit: {pallet.max_weight:,.1f} {w_unit}" if pallet.max_weight else "No weight limit",
-    )
-    m1.metric("Build height", f"{build_height:g} {unit}", help=f"Deck + load, from the floor. {limit_text}.")
-    m2.metric("Headroom", f"{pallet.height - build_height:g} {unit}" if pallet.height else "–",
-              help="Space left under the max build height.")
-    stacked = result.layers >= 2 and result.stacking != "column"
-    m1.metric("Interlock", f"{result.interlock:.0%}" if stacked else "–",
-              help="Share of cases resting on two or more cases in the layer below (bridging the seams).")
-    m2.metric("Min support", f"{result.min_support:.0%}" if stacked else "–",
-              help="Smallest share of any case's base that rests on cases below.")
-
-    if ok:
-        if count == result.capacity:
-            if pallet.height:
-                st.info(f"Limited by **pallet space**: {result.max_layers} layers of {result.cases_per_layer} "
-                        f"fill the build height.")
-            else:
-                st.info("Single layer: set a **max build height** to stack layers.")
-        elif limit_violations:
-            st.info(f"Limited by **{_limit_reason(limit_violations)}**: one more case would break it.")
-    if not ok and result.violations:
-        st.error("\n".join(f"- {v}" for v in _summarize_violations(result.violations)))
-
-    rotated = sum(1 for p in result.placements if p.orientation[:2] != (0, 1))
-    tipped = sum(1 for p in result.placements if p.orientation[2] != 2)
-    partial = count - (result.layers - 1) * result.cases_per_layer if count else 0
-    top_note = f" · top layer {partial} of {result.cases_per_layer}" if count and partial < result.cases_per_layer else ""
-    st.caption(f"{count - rotated} as entered · {rotated} rotated · {tipped} tipped{top_note}")
-    if result.layers >= 2:
-        layering = "every layer the same pattern" if result.flip == "none" else f"even layers {FLIP_LABELS[result.flip]}"
-        st.caption(f"Stacking: {STACKING_LABELS[result.stacking].split(' (')[0].lower()} \u00b7 {layering}")
-    if result.stacking_note:
-        st.warning(result.stacking_note)
-    _render_solver_status(result, solve_ms)
-
 sens_rows: list[dict] = []
 sens_labels: list[str] = []
 if ss.sens_on and count:
@@ -695,50 +676,113 @@ if ss.sens_on and count:
             case_args, count, fixed, ss.sens_step if fixed else ss.sens_pct, ss.sens_steps, p_unit,
         )
 
-table_tab, sens_tab, export_tab = st.tabs(["Placements", "Sensitivity", "Export"])
 placement_rows = _placement_rows(result)
-with table_tab:
-    st.dataframe(placement_rows, hide_index=True, width="content", height=300)
-with sens_tab:
-    if sens_rows:
-        _render_sensitivity(sens_rows, sens_labels, count, p_unit)
-    else:
-        st.info("Turn on case size sensitivity in the sidebar (and make sure at least one case fits).")
-with export_tab:
-    settings = {
-        "Stacking": STACKING_LABELS[ss.stacking],
-        "Min support setting": min_support,
-        "GA": f"{ga_args[0]} generations, population {ga_args[1]}, seed {ga_args[2]}" if ga_args else "off",
-    }
-    summary = _summary_rows(pallet, result, count, (p_unit, w_unit), settings)
-    solver_rows = _solver_rows(result)
-    history_rows = [
-        {"Solver": run.solver, "Generation": h[0], "Best objective": h[1], "Mean objective": h[2], "Best interlock": h[3]}
-        for run in result.solver_runs for h in run.history
-    ]
-    sheets = {"Summary": summary, "Placements": placement_rows, "Solver runs": solver_rows}
-    if history_rows:
-        sheets["GA history"] = history_rows
-    if sens_rows:
-        sheets["Sensitivity"] = sens_rows
-    payload = {
-        "pallet": pallet_args,
-        "case": case_args,
-        "weight_unit": w_unit,
-        "settings": settings,
-        "summary": {row["Field"]: row["Value"] for row in summary},
-        "solver_runs": solver_rows,
-        "ga_history": history_rows,
-        "violations": result.violations,
-        "placements": placement_rows,
-        "sensitivity": sens_rows,
-    }
-    c1, c2, c3 = st.columns(3)
-    c1.download_button("Excel (.xlsx)", _excel_bytes(sheets), file_name="pallet_layout.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
-    c2.download_button("CSV (placements)", pd.DataFrame(placement_rows).to_csv(index=False),
-                       file_name="pallet_layout.csv", mime="text/csv", width="stretch")
-    c3.download_button("JSON", json.dumps(payload, indent=2, default=str), file_name="pallet_layout.json",
-                       mime="application/json", width="stretch")
-    st.caption("Excel has Summary, Placements, Solver runs, GA history and Sensitivity sheets; CSV is the placement grid; "
-               "JSON has everything, so a run can be reproduced or reviewed later.")
+view_col, info_col = st.columns(2, gap="large")
+with view_col:
+    view_tab, table_tab, sens_tab = st.tabs(["3D view", "Placements", "Sensitivity"])
+    with view_tab:
+        if result.placements:
+            _render_3d(pallet, result)
+        else:
+            st.info("Nothing to draw. Adjust the inputs in the sidebar.")
+    with table_tab:
+        st.dataframe(placement_rows, hide_index=True, width="content", height=380)
+        settings = {
+            "Stacking": STACKING_LABELS[ss.stacking],
+            "Min support setting": min_support,
+            "GA": f"{ga_args[0]} generations, population {ga_args[1]}, seed {ga_args[2]}" if ga_args else "off",
+        }
+        summary = _summary_rows(pallet, result, count, (p_unit, w_unit), settings)
+        solver_rows = _solver_rows(result)
+        history_rows = [
+            {"Solver": run.solver, "Generation": h[0], "Best objective": h[1], "Mean objective": h[2], "Best interlock": h[3]}
+            for run in result.solver_runs for h in run.history
+        ]
+        sheets = {"Summary": summary, "Placements": placement_rows, "Solver runs": solver_rows}
+        if history_rows:
+            sheets["GA history"] = history_rows
+        if sens_rows:
+            sheets["Sensitivity"] = sens_rows
+        payload = {
+            "pallet": pallet_args,
+            "case": case_args,
+            "weight_unit": w_unit,
+            "settings": settings,
+            "summary": {row["Field"]: row["Value"] for row in summary},
+            "solver_runs": solver_rows,
+            "ga_history": history_rows,
+            "violations": result.violations,
+            "placements": placement_rows,
+            "sensitivity": sens_rows,
+        }
+        c1, c2, c3 = st.columns(3)
+        c1.download_button("Excel (.xlsx)", _excel_bytes(sheets), file_name="pallet_layout.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch")
+        c2.download_button("CSV (placements)", pd.DataFrame(placement_rows).to_csv(index=False),
+                           file_name="pallet_layout.csv", mime="text/csv", width="stretch")
+        c3.download_button("JSON", json.dumps(payload, indent=2, default=str), file_name="pallet_layout.json",
+                           mime="application/json", width="stretch")
+        st.caption("CSV is this placement grid. Excel adds Summary, Solver runs, GA history and Sensitivity "
+                   "sheets; JSON has everything, including the inputs, so a run can be reproduced later.")
+    with sens_tab:
+        if sens_rows:
+            _render_sensitivity(sens_rows, sens_labels, count, p_unit)
+        else:
+            st.info("Turn on case size sensitivity in the sidebar (and make sure at least one case fits).")
+
+with info_col:
+    summary_tab, iterations_tab = st.tabs(["Summary", "By iteration"])
+    with summary_tab:
+        limit_text = (
+            f"Limit {pallet.height:g} {unit} (deck {pallet.deck_height or 0:g} + load {pallet.load_height_limit:g})"
+            if pallet.height is not None else "No build height limit"
+        )
+        m1, m2 = st.columns(2)
+        m1.metric("Cases", count)
+        m2.metric("Malleable bound", result.volume_bound,
+                  help="Cases that would fit if they were perfectly malleable: the space above the deck up to "
+                       "the build height divided by case volume. Ignores weight and other limits.")
+        m1.metric("Layers", f"{result.layers} × {result.cases_per_layer}" if count else "0",
+                  help=f"Layers × cases per layer. Up to {result.max_layers} layers fit the build height.")
+        m2.metric("Cube use", f"{result.volume_utilization:.1%}" if pallet.height is not None else "–",
+                  help="Case volume as a share of the space above the deck up to the max build height.")
+        m1.metric("Deck coverage", f"{result.utilization:.1%}", help="Share of the deck covered by the base layer.")
+        m2.metric(
+            "Load weight",
+            f"{placed_weight:,.1f} {w_unit}",
+            help=f"Limit: {pallet.max_weight:,.1f} {w_unit}" if pallet.max_weight is not None else "No weight limit",
+        )
+        m1.metric("Build height", f"{build_height:g} {unit}", help=f"Deck + load, from the floor. {limit_text}.")
+        m2.metric("Headroom", f"{pallet.height - build_height:g} {unit}" if pallet.height is not None else "–",
+                  help="Space left under the max build height.")
+        stacked = result.layers >= 2 and result.stacking != "column"
+        m1.metric("Interlock", f"{result.interlock:.0%}" if stacked else "–",
+                  help="Share of cases resting on two or more cases in the layer below (bridging the seams).")
+        m2.metric("Min support", f"{result.min_support:.0%}" if stacked else "–",
+                  help="Smallest share of any case's base that rests on cases below.")
+
+        if ok:
+            if count == result.capacity:
+                if pallet.height is not None:
+                    st.info(f"Limited by **pallet space**: {result.max_layers} layers of {result.cases_per_layer} "
+                            f"fill the build height.")
+                else:
+                    st.info("Single layer: set a **max build height** to stack layers.")
+            elif limit_violations:
+                st.info(f"Limited by **{_limit_reason(limit_violations)}**: one more case would break it.")
+        if not ok and result.violations:
+            st.error("\n".join(f"- {v}" for v in _summarize_violations(result.violations)))
+
+        rotated = sum(1 for p in result.placements if p.orientation[:2] != (0, 1))
+        tipped = sum(1 for p in result.placements if p.orientation[2] != 2)
+        partial = count - (result.layers - 1) * result.cases_per_layer if count else 0
+        top_note = f" · top layer {partial} of {result.cases_per_layer}" if count and partial < result.cases_per_layer else ""
+        st.caption(f"{count - rotated} as entered · {rotated} rotated · {tipped} tipped{top_note}")
+        if result.layers >= 2:
+            layering = "every layer the same pattern" if result.flip == "none" else f"even layers {FLIP_LABELS[result.flip]}"
+            st.caption(f"Stacking: {STACKING_LABELS[result.stacking].split(' (')[0].lower()} \u00b7 {layering}")
+        if result.stacking_note:
+            st.warning(result.stacking_note)
+        _render_solver_status(result, solve_ms)
+    with iterations_tab:
+        _render_iterations(result)
