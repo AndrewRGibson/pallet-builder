@@ -298,10 +298,11 @@ The results area is split 50:50 between the 3D view and the results:
   - When the GA runs, a chart of its best and mean objective per generation, plus best interlock on a second axis when stacking interlocks. The bound and the block packer's score are drawn as reference lines.
 - **Tabs**:
   - **Placements**: the layer, pattern (A or flipped B), x/y/z and size for each case. Columns fit their content.
-  - **Sensitivity**: re-solves with case length, width and height changed independently.
-    - **Settings table:** each dimension has its own on/off, change type (a fixed amount, default 0.2 in / 0.5 cm, or a percentage, default 2%), step size, and 1–5 steps each way.
-    - **Results:** for each variant, the case size, cases and the change from the base, Ti (cases per layer) and Hi (layers), deck coverage, cube use and interlock. The percentage columns and case counts are drawn as in-cell bars.
-    - **Order:** the base case is highlighted at the top, and the variants follow, ranked by fitness: most cases, then cube use, interlock and deck coverage.
+  - **Sensitivity**: re-solves every combination of case-size changes. Each of length, width and height is either left unchanged or moved by one of its own steps, independently of the others.
+    - **Settings table:** each dimension has its own on/off, change type (a fixed amount, default 0.2 in / 0.5 cm, or a percentage, default 2%), step size, and 1–3 steps each way (default 1).
+    - **Runs:** (2n+1)³ − 1 for n steps on all three dimensions: 26 at 1 step, up to 342 at 3. A progress bar shows the run. Steps that would take a dimension to zero or below are skipped and listed.
+    - **Results:** for each combination, the change to each dimension ("–" when unchanged), the case size, cases and the change from the base, Ti (cases per layer) and Hi (layers), deck coverage, cube use and interlock. Case counts and percentage columns are drawn as in-cell bars.
+    - **Order:** the base case is highlighted at the top, and the combinations follow, ranked by fitness: most cases, then cube use, interlock and deck coverage.
   - **Export**:
     - **Excel**: Summary, Placements, Solver runs, GA history and Sensitivity sheets.
     - **CSV**: the placement grid.

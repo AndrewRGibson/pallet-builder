@@ -4,6 +4,7 @@ import io
 import json
 import math
 import time
+from itertools import product
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -40,7 +41,7 @@ SENS_DIMENSIONS = (("Length", "length"), ("Width", "width"), ("Height", "height"
 def _default_sens_config(length_unit: str) -> list[dict]:
     return [
         {"Dimension": name, "On": True, "By": SENS_FIXED, "Fixed step": DEFAULT_SENS_STEP[length_unit],
-         "Percent step": DEFAULT_SENS_PCT, "Steps": 2}
+         "Percent step": DEFAULT_SENS_PCT, "Steps": 1}
         for name, _ in SENS_DIMENSIONS
     ]
 
@@ -411,7 +412,12 @@ def _render_solver_status(result, solve_ms: float) -> None:
     if not result.solver_runs:
         return
     st.markdown(f"**Solver status** \u00b7 solved in {solve_ms:,.0f} ms")
-    st.dataframe(_solver_rows(result), hide_index=True, width="stretch", column_config=_SOLVER_COLUMNS)
+    rows = _solver_rows(result)
+    # Streamlit's auto-fit doesn't widen long text, and it can only wrap when every row is over 4rem
+    # tall (no per-row heights), so size the Note column to its longest entry instead.
+    longest = max((len(row["Note"]) for row in rows), default=0)
+    columns = {**_SOLVER_COLUMNS, "Note": st.column_config.TextColumn(width=min(max(round(7.5 * longest) + 32, 120), 900))}
+    st.dataframe(rows, hide_index=True, width="stretch", column_config=columns)
     st.caption("Iterations: block packer = region states solved, GA = generations. Evaluations: block packer = "
                "cuts tried, GA = distinct patterns decoded. Times are from the first solve (results are cached).")
 
@@ -518,12 +524,10 @@ def _excel_bytes(sheets: dict[str, list[dict]]) -> bytes:
     return buffer.getvalue()
 
 
-def _sens_row(dimension: str, step: int, change: str, case_args: dict, count: int, result, base_count: int) -> dict:
+def _sens_row(changes: dict[str, str], case_args: dict, count: int, result, base_count: int) -> dict:
     stacked = result.layers >= 2 and result.stacking != "column"
     return {
-        "Dimension": dimension,
-        "Step": step,
-        "Change": change,
+        **changes,  # one column per dimension: its change, or "\u2013" when unchanged
         "Case size": f"{case_args['length']:g} \u00d7 {case_args['width']:g} \u00d7 {case_args['height']:g}",
         "Cases": count,
         "\u0394 cases": count - base_count,
@@ -542,10 +546,13 @@ def _fitness(row: dict) -> tuple:
 
 # Smallest case dimension a variant may have (matches the sidebar's minimum case size).
 MIN_CASE_DIMENSION = 0.001
+# Steps each way are capped: every combination is solved, so 3 steps on all three dimensions is
+# already 7 x 7 x 7 - 1 = 342 runs.
+MAX_SENS_STEPS = 3
 
 
 def _clean_sens_settings(settings: dict, length_unit: str) -> dict:
-    """Coerce one dimension's settings to sensible values: positive steps, 0.1-50%, 1-5 steps."""
+    """Coerce one dimension's settings to sensible values: positive steps, 0.1-50%, 1-3 steps."""
 
     def number(value, default: float) -> float:
         try:
@@ -560,44 +567,74 @@ def _clean_sens_settings(settings: dict, length_unit: str) -> dict:
         "By": settings.get("By") if settings.get("By") in (SENS_FIXED, SENS_PCT) else SENS_FIXED,
         "Fixed step": max(abs(number(settings.get("Fixed step"), DEFAULT_SENS_STEP[length_unit])), MIN_CASE_DIMENSION),
         "Percent step": min(max(abs(number(settings.get("Percent step"), DEFAULT_SENS_PCT)), 0.1), 50.0),
-        "Steps": int(min(max(round(number(settings.get("Steps"), 2)), 1), 5)),
+        "Steps": int(min(max(round(number(settings.get("Steps"), 1)), 1), MAX_SENS_STEPS)),
     }
 
 
-def _sensitivity(solve, case_args: dict, base: tuple, config: list[dict], unit: str) -> tuple[list[dict], list[str]]:
-    """Re-solve with each enabled dimension changed independently, per its own step settings.
+def _sens_options(settings: dict, name: str, key: str, case_args: dict, unit: str,
+                  skipped: list[str]) -> list[tuple[str, float]]:
+    """(change label, value) for one dimension: the base value plus each valid step either way."""
+    options = [("\u2013", case_args[key])]
+    if not settings["On"]:
+        return options
+    fixed = settings["By"] == SENS_FIXED
+    amount = settings["Fixed step"] if fixed else settings["Percent step"]
+    for k in range(-settings["Steps"], settings["Steps"] + 1):
+        if k == 0:
+            continue
+        change = f"{k * amount:+g} {unit}" if fixed else f"{k * amount:+g}%"
+        value = round(case_args[key] + k * amount if fixed else case_args[key] * (1 + k * amount / 100), 6)
+        if value < MIN_CASE_DIMENSION:
+            skipped.append(f"{name} {change} (would make the {key} {value:g} {unit})")
+            continue
+        options.append((change, value))
+    return options
 
-    ``solve(case_args)`` returns (count, result). Returns the base row first, then the variants
-    ranked by fitness (descending), plus a note for every variant skipped because it would take a
-    dimension below the minimum case size (so nothing is ever zero or negative).
+
+def _sens_variant_count(config: list[dict], case_args: dict, unit: str) -> int:
+    total = 1
+    for settings, (name, key) in zip(config, SENS_DIMENSIONS):
+        total *= len(_sens_options(_clean_sens_settings(settings, unit), name, key, case_args, unit, []))
+    return total - 1
+
+
+def _sensitivity(solve, case_args: dict, base: tuple, config: list[dict], unit: str,
+                 progress=None) -> tuple[list[dict], list[str]]:
+    """Re-solve every combination of case-size changes: each dimension is either left alone or moved
+    by one of its own steps, independently of the others.
+
+    ``solve(case_args)`` returns (count, result); ``progress(done, total)`` is called after each
+    solve. Returns the base row first, then the variants ranked by fitness (descending), plus a note
+    for every step skipped because it would take a dimension below the minimum case size (so nothing
+    is ever zero or negative).
     """
     base_count, base_result = base
-    rows, skipped = [], []
-    for settings, (name, key) in zip(config, SENS_DIMENSIONS):
-        settings = _clean_sens_settings(settings, unit)
-        if not settings["On"]:
-            continue
-        fixed = settings["By"] == SENS_FIXED
-        amount = settings["Fixed step"] if fixed else settings["Percent step"]
-        for k in range(-settings["Steps"], settings["Steps"] + 1):
-            if k == 0:
-                continue
-            change = f"{k * amount:+g} {unit}" if fixed else f"{k * amount:+g}%"
-            value = round(case_args[key] + k * amount if fixed else case_args[key] * (1 + k * amount / 100), 6)
-            if value < MIN_CASE_DIMENSION:
-                skipped.append(f"{name} {change} (would make the {key} {value:g} {unit})")
-                continue
-            variant = {**case_args, key: value}
-            count, result = solve(variant)
-            rows.append(_sens_row(name, k, change, variant, count, result, base_count))
+    skipped: list[str] = []
+    per_dimension = [
+        _sens_options(_clean_sens_settings(settings, unit), name, key, case_args, unit, skipped)
+        for settings, (name, key) in zip(config, SENS_DIMENSIONS)
+    ]
+    combos = [combo for combo in product(*per_dimension) if any(change != "\u2013" for change, _ in combo)]
+    rows = []
+    for done, combo in enumerate(combos, start=1):
+        variant = dict(case_args)
+        changes = {}
+        for (name, key), (change, value) in zip(SENS_DIMENSIONS, combo):
+            variant[key] = value
+            changes[name] = change
+        count, result = solve(variant)
+        rows.append(_sens_row(changes, variant, count, result, base_count))
+        if progress is not None:
+            progress(done, len(combos))
     rows.sort(key=_fitness, reverse=True)
-    return [_sens_row("Base", 0, "\u2013", case_args, base_count, base_result, base_count), *rows], skipped
+    base_changes = {name: "\u2013" for name, _ in SENS_DIMENSIONS}
+    return [_sens_row(base_changes, case_args, base_count, base_result, base_count), *rows], skipped
 
 
 _SENS_COLUMNS = {
-    "Dimension": st.column_config.TextColumn(pinned=True),
-    "Step": st.column_config.NumberColumn(format="%+d", alignment="right", help="Steps from the base case"),
-    "Change": st.column_config.TextColumn(pinned=True),
+    "Length": st.column_config.TextColumn(pinned=True, alignment="right", help="Change in case length"),
+    "Width": st.column_config.TextColumn(pinned=True, alignment="right", help="Change in case width"),
+    "Height": st.column_config.TextColumn(pinned=True, alignment="right", help="Change in case height"),
     "Case size": st.column_config.TextColumn(),
     # "Cases" becomes an in-cell bar scaled to the largest variant (set in _render_sensitivity).
     "Cases": st.column_config.NumberColumn(format="localized", alignment="right"),
@@ -616,7 +653,7 @@ _SENS_EDITOR_COLUMNS = {
     "By": st.column_config.SelectboxColumn(options=[SENS_FIXED, SENS_PCT], required=True),
     "Fixed step": st.column_config.NumberColumn(min_value=0.001, step=0.1, format="%g", required=True),
     "Percent step": st.column_config.NumberColumn(min_value=0.1, max_value=50.0, step=0.5, format="%g%%", required=True),
-    "Steps": st.column_config.NumberColumn("Steps each way", min_value=1, max_value=5, step=1, format="%d",
+    "Steps": st.column_config.NumberColumn("Steps each way", min_value=1, max_value=MAX_SENS_STEPS, step=1, format="%d",
                                            required=True),
 }
 
@@ -640,7 +677,7 @@ def _render_sensitivity(rows: list[dict]) -> None:
     st.dataframe(styled, hide_index=True, width="stretch", height=min(38 + 35 * len(frame), 420),
                  column_config=columns)
     st.caption("Base case highlighted; variants ranked by fitness: most cases, then cube use, interlock and deck "
-               "coverage. Each variant is a full re-solve with the same pallet, stacking and solver settings.")
+               "coverage. Each combination is a full re-solve with the same pallet, stacking and solver settings.")
 
 
 # --- Sidebar: every input that controls the solve ------------------------------------------
@@ -770,17 +807,23 @@ with view_col:
     sens_skipped: list[str] = []
     with sens_tab:
         st.toggle("Run case size sensitivity", key="sens_on",
-                  help="Re-solve with each case dimension increased and reduced, independently.")
+                  help="Re-solve every combination of case-size changes: each dimension is unchanged or "
+                       "moved by one of its own steps.")
         edited = st.data_editor(pd.DataFrame(ss.sens_config), key="sens_editor", hide_index=True, width="stretch",
                                 column_config={**_SENS_EDITOR_COLUMNS, "Fixed step": {
                                     **_SENS_EDITOR_COLUMNS["Fixed step"], "label": f"Fixed step ({p_unit})"}},
                                 disabled=not ss.sens_on, num_rows="fixed")
         if ss.sens_on and count:
-            with st.spinner("Running sensitivity\u2026"):
-                sens_rows, sens_skipped = _sensitivity(
-                    lambda variant: _solve(pallet_args, variant, ga_args, ss.stacking, min_support)[:2],
-                    case_args, (count, result), edited.to_dict("records"), p_unit,
-                )
+            config = edited.to_dict("records")
+            st.caption(f"{_sens_variant_count(config, case_args, p_unit)} combinations: each dimension is "
+                       "either unchanged or moved by one of its steps.")
+            bar = st.progress(0.0, text="Running sensitivity\u2026")
+            sens_rows, sens_skipped = _sensitivity(
+                lambda variant: _solve(pallet_args, variant, ga_args, ss.stacking, min_support)[:2],
+                case_args, (count, result), config, p_unit,
+                progress=lambda done, total: bar.progress(done / total, text=f"Sensitivity: {done} of {total}"),
+            )
+            bar.empty()
             if len(sens_rows) > 1:
                 _render_sensitivity(sens_rows)
                 if sens_skipped:
