@@ -1,9 +1,9 @@
 from .solver import (
+    STANDARD_PALLETS,
     Case,
     LayoutResult,
     Pallet,
     Placement,
-    STANDARD_PALLETS,
     build_layout,
     convert_length,
     generate_layout,
@@ -15,11 +15,11 @@ from .solver import (
 )
 
 __all__ = [
+    "STANDARD_PALLETS",
     "Case",
     "LayoutResult",
     "Pallet",
     "Placement",
-    "STANDARD_PALLETS",
     "build_layout",
     "convert_length",
     "generate_layout",

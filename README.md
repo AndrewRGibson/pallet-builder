@@ -160,32 +160,36 @@ A sensible phased strategy is:
 4. Stacking logic: allow only legal stacks or columns and enforce stability checks.
 5. Metaheuristic improvement: run a GA or local-search improvement loop atop a feasible layout to reduce waste or improve placement symmetry.
 
-This repo implements the first step in that roadmap: a deterministic heuristic layered packer for a fixed pallet footprint and a single repeated case type. That gives a quick, explainable baseline for one-case pallet runs and keeps the project tightly aligned with the current scope.
+This repo implements the first two steps of that roadmap: a deterministic single-layer packer for a fixed pallet footprint and a single repeated case type. That gives a quick, explainable baseline for one-case pallet runs and keeps the project tightly aligned with the current scope.
 
 ## Current solver behavior
 
+The solver packs a single layer of one case type:
+
+- It first runs a **block packer**. This is a recursive guillotine search: each region is either filled with a uniform grid of one case orientation or cut in two, and each half is solved the same way. This finds the classic block patterns. For example, 5×8 cases on a 40×48 deck give the full 48.
+- For loads of up to 400 cases, a greedy packer runs as a fallback, and the solver keeps whichever layout places more.
+- Cases marked *this side up* (the default) only rotate flat on the deck. Set `this_side_up=False` to let the solver tip them, and it then prefers orientations under the height limit.
+
 The package exposes:
 
-- Case: a case definition with dimensions and optional weight
-- Pallet: pallet envelope and constraints
-- solve_pallet_layout: a heuristic placement function that returns feasibility, utilization, and placement data for a single case type
+- `Case`: dimensions, weight, quantity, unit, and `this_side_up`.
+- `Pallet`: the deck footprint, `height` (max load height above the deck; `None` means no limit), `deck_height` (the pallet's own height, for reference only), and optional `max_weight`, `max_volume` and `max_plan_area`. Use `Pallet.from_standard("CHEP" | "GMA" | "EUR_1200X800" | "EUR_1000X1200", unit=..., max_load_height=...)` for standard pallets.
+- `solve_pallet_layout(pallet, cases, optimize=False, ...)`: places the given cases and returns feasibility, deck coverage, placements and violations.
+- `maximize_case_count(pallet, case)`: finds the largest number of a case that fits, and returns that count with its layout.
 
-A simple usage example is:
+Example:
 
 ```python
-from pallet_builder import Case, Pallet, solve_pallet_layout
+from pallet_builder import Case, Pallet, maximize_case_count, solve_pallet_layout
 
-pallet = Pallet(length=10, width=8, height=6, max_weight=2000)
-cases = [
-    Case("A", 4, 2, 2, weight=100),
-    Case("B", 4, 2, 2, weight=110),
-    Case("C", 3, 2, 2, weight=120),
-]
+pallet = Pallet.from_standard("CHEP", unit="in", max_load_height=60)
+case = Case("Widget", length=8, width=5, height=6, weight=12, unit="in")
 
-result = solve_pallet_layout(pallet, cases)
-print(result.feasible)
-print(result.utilization)
-print(result.placements)
+count, layout = maximize_case_count(pallet, case)
+print(count, f"{layout.utilization:.0%}")  # 48 100%
+
+result = solve_pallet_layout(pallet, [Case("Widget", 8, 5, 6, weight=12, quantity=30)])
+print(result.feasible, len(result.placements))  # True 30
 ```
 
 ## Recommendations for future versions
