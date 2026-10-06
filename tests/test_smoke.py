@@ -398,7 +398,8 @@ def test_ga_beats_block_packer_with_interlocking_layer():
 
 def test_ga_reaches_the_bound_and_stops_early():
     chep = Pallet.from_standard("CHEP", unit="in")
-    _, result = maximize_case_count(chep, Case("G", 19, 7, 6))
+    # Column stacking: the objective is the case count alone, so the optimum is exactly the bound.
+    _, result = maximize_case_count(chep, Case("G", 19, 7, 6), stacking="column")
     run = next(run for run in result.solver_runs if run.solver == "Genetic algorithm")
 
     assert run.cases_per_layer == run.target == 14
@@ -420,4 +421,81 @@ def test_volume_bound_assumes_malleable_cases():
     chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
     _, result = maximize_case_count(chep, Case("V", 12, 10, 8))
 
-    assert result.volume_bound == int(40 * 48 * 54 // (12 * 10 * 8))  # 108
+    assert result.volume_bound == (40 * 48 * 54 // (12 * 10 * 8))  # 108
+
+
+def _layer_xy(result, layer_number):
+    z_values = sorted({p.z for p in result.placements})
+    return sorted((round(p.x, 6), round(p.y, 6), p.length, p.width)
+                  for p in result.placements if p.z == z_values[layer_number])
+
+
+def test_interlock_never_costs_cases_and_respects_min_support():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    for length, width in [(9, 7), (12, 10), (8, 5), (11, 9), (14, 9)]:
+        case = Case("I", length, width, 8)
+        column, _ = maximize_case_count(chep, case, stacking="column")
+        interlock, result = maximize_case_count(chep, case, stacking="interlock", min_support=0.7)
+        assert interlock == column, (length, width)
+        assert result.min_support >= 0.7 - 1e-9, (length, width, result.min_support)
+        _assert_valid_load(chep, result.placements)
+
+
+def test_interlocked_layers_alternate_a_flipped_pattern():
+    from pallet_builder.solver import FLIP_LABELS
+
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    _, result = maximize_case_count(chep, Case("I", 9, 7, 8), stacking="interlock")
+
+    assert result.flip in FLIP_LABELS and result.flip != "none"
+    assert result.interlock > 0.5
+    assert _layer_xy(result, 0) == _layer_xy(result, 2)  # odd layers share pattern A
+    assert _layer_xy(result, 0) != _layer_xy(result, 1)  # even layers use the flipped pattern B
+    _assert_valid_load(chep, result.placements)
+
+
+def test_column_stacking_repeats_one_pattern():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    _, result = maximize_case_count(chep, Case("C", 9, 7, 8), stacking="column")
+
+    assert result.flip == "none" and result.interlock == 0
+    assert all(_layer_xy(result, i) == _layer_xy(result, 0) for i in range(result.layers))
+
+
+def test_no_column_stacking_falls_back_to_one_layer_when_nothing_interlocks():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    count, result = maximize_case_count(chep, Case("N", 9, 8, 8), stacking="no_column")
+
+    assert result.layers == 1 and count == result.cases_per_layer
+    assert "Column stacking is disallowed" in result.stacking_note
+
+
+def test_no_column_keeps_full_count_when_an_interlocking_pattern_exists():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    case = Case("N", 7, 4, 8)
+    interlock, _ = maximize_case_count(chep, case, stacking="interlock")
+    no_column, result = maximize_case_count(chep, case, stacking="no_column")
+
+    assert no_column == interlock
+    assert result.interlock > 0 and not result.stacking_note
+
+
+def test_stacking_options_are_validated():
+    import pytest
+
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    with pytest.raises(ValueError, match="stacking"):
+        maximize_case_count(chep, Case("V", 9, 7, 8), stacking="pyramid")
+    with pytest.raises(ValueError, match="min_support"):
+        maximize_case_count(chep, Case("V", 9, 7, 8), min_support=1.5)
+
+
+def test_solver_runs_report_work_and_time():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    _, result = maximize_case_count(chep, Case("T", 9, 7, 8))
+    runs = {run.solver: run for run in result.solver_runs}
+
+    assert runs["Block packer"].iterations > 0 and runs["Block packer"].evaluations > 0
+    assert runs["Genetic algorithm"].iterations == len(runs["Genetic algorithm"].history) - 1
+    assert runs["Genetic algorithm"].evaluations > 0
+    assert all(run.elapsed_ms >= 0 for run in result.solver_runs)

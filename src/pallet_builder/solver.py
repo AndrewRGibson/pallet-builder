@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import random
-from bisect import bisect_right
+import time
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -192,8 +193,17 @@ class SolverRun:
     ran: bool = True
     selected: bool = False
     note: str = ""
-    # (generation, best objective, mean objective) per GA generation; empty for other solvers.
-    history: tuple[tuple[int, float, float], ...] = ()
+    # (generation, best objective, mean objective, best interlock) per GA generation; empty for
+    # other solvers.
+    history: tuple[tuple[int, float, float, float], ...] = ()
+    # Best flip for alternate layers and the interlock it gives (None when stacking is "column").
+    flip: str = "none"
+    interlock: float | None = None
+    # Work done: block packer = region states solved / cuts tried; GA = generations run / distinct
+    # patterns decoded. Elapsed time is measured when first computed (results are cached).
+    iterations: int = 0
+    evaluations: int = 0
+    elapsed_ms: float = 0.0
 
 
 @dataclass
@@ -212,6 +222,13 @@ class LayoutResult:
     solver_runs: list[SolverRun] = field(default_factory=list)
     # Cases that would fit if they were perfectly malleable (space above the deck / case volume).
     volume_bound: int = 0
+    # Stacking: the mode used, how alternate layers are flipped, the share of cases resting on two or
+    # more cases below, and the smallest supported share of any case's base.
+    stacking: str = "column"
+    flip: str = "none"
+    interlock: float = 0.0
+    min_support: float = 1.0
+    stacking_note: str = ""
 
     @property
     def capacity(self) -> int:
@@ -302,6 +319,9 @@ def _split_free_rectangles(
     return deduped
 
 
+Spots = tuple[tuple[float, float, int], ...]
+Footprints = tuple[tuple[float, float], ...]
+
 # Above this many (x, y) normal-position states the recursive guillotine search gets slow in pure
 # Python, so the block packer falls back to one-cut (two-block) patterns.
 _MAX_GUILLOTINE_STATES = 6000
@@ -327,13 +347,16 @@ def _block_layout(
     length: float,
     width: float,
     footprints: tuple[tuple[float, float], ...],
-) -> tuple[tuple[float, float, int], ...]:
+) -> tuple[Spots, int, int, float]:
     """Best guillotine layout of identical rectangles, as (x, y, footprint index) tuples.
 
     Each region is either filled with a uniform grid of one footprint or cut in two at a normal
     position and both halves solved recursively. This finds the classic block patterns (e.g. a
-    5x8 case on a 40x48 deck: 48, where the greedy packer manages 45).
+    5x8 case on a 40x48 deck: 48, where the greedy packer manages 45). Also returns the number of
+    region states solved, cuts tried, and the elapsed milliseconds.
     """
+    started = time.perf_counter()
+    cuts_tried = 0
     xs = _normal_positions(length, [fp[0] for fp in footprints])
     ys = _normal_positions(width, [fp[1] for fp in footprints])
     max_cuts = _UNLIMITED_CUTS if len(xs) * len(ys) <= _MAX_GUILLOTINE_STATES else 1
@@ -356,11 +379,13 @@ def _block_layout(
                 best = (count, ("grid", index))
 
         if cuts != 0:
+            nonlocal cuts_tried
             sub_cuts = cuts if cuts == _UNLIMITED_CUTS else cuts - 1
             for x in xs:
                 if x >= region_l - 1e-9:
                     break
                 if x > 0:
+                    cuts_tried += 1
                     count = solve(x, region_w, sub_cuts)[0] + solve(region_l - x, region_w, sub_cuts)[0]
                     if count > best[0]:
                         best = (count, ("v", x, sub_cuts))
@@ -368,6 +393,7 @@ def _block_layout(
                 if y >= region_w - 1e-9:
                     break
                 if y > 0:
+                    cuts_tried += 1
                     count = solve(region_l, y, sub_cuts)[0] + solve(region_l, region_w - y, sub_cuts)[0]
                     if count > best[0]:
                         best = (count, ("h", y, sub_cuts))
@@ -393,42 +419,117 @@ def _block_layout(
 
     build(0.0, 0.0, length, width, max_cuts)
     # Fill from the origin outward so a partial load (fewer cases than fit) stays compact.
-    return tuple(sorted(spots, key=lambda spot: (spot[1], spot[0])))
+    ordered = tuple(sorted(spots, key=lambda spot: (spot[1], spot[0])))
+    return ordered, len(memo), cuts_tried, (time.perf_counter() - started) * 1000
 
 
 # The GA's per-layer target is the malleable bound (deck area / case footprint); every case short of
 # it costs this much, so the objective peaks at the bound itself.
 _GA_UNPLACED_PENALTY = 1.0
+# Interlock (0-1) is added on top with a weight below the 2-point step of one more case, so it only
+# ever breaks ties between layers with the same count.
+_GA_INTERLOCK_WEIGHT = 0.999
 # Above this many cases per layer the bottom-left decoder gets slow in pure Python.
 _GA_MAX_TARGET = 150
 
 GASettings = tuple[int, int, int]  # (generations, population, seed)
 DEFAULT_GA: GASettings = (40, 24, 0)
 
+# Stacking modes: "column" repeats one pattern; "interlock" flips alternate layers when that adds
+# interlock; "no_column" requires interlock and otherwise limits the load to a single layer.
+STACKING_MODES = ("column", "interlock", "no_column")
+DEFAULT_STACKING = "interlock"
+# A case above must have at least this share of its base resting on cases below.
+DEFAULT_MIN_SUPPORT = 0.7
+# A case below counts as a support (for interlock) when it carries at least this share of the case above.
+_BRIDGE_SHARE = 0.10
+FLIP_LABELS = {
+    "none": "same pattern as the layer below (column)",
+    "mirror_length": "mirrored along the length",
+    "mirror_width": "mirrored along the width",
+    "rotate_180": "rotated 180\u00b0",
+}
+
+
+def _flip_spots(spots: Spots, footprints: Footprints, length: float, width: float, flip: str) -> Spots:
+    flipped = []
+    for x, y, index in spots:
+        fp_l, fp_w = footprints[index]
+        if flip in ("mirror_length", "rotate_180"):
+            x = length - x - fp_l
+        if flip in ("mirror_width", "rotate_180"):
+            y = width - y - fp_w
+        flipped.append((round(x, 9), round(y, 9), index))
+    return tuple(flipped)
+
+
+def _rest_stats(upper: Spots, lower: Spots, footprints: Footprints) -> tuple[float, float]:
+    """(share of upper cases resting on two or more lower cases, smallest supported share of any)."""
+    if not upper:
+        return 0.0, 1.0
+    widest = max(fp[0] for fp in footprints)
+    lower = tuple(sorted(lower))
+    lower_x = [spot[0] for spot in lower]
+    bridging, min_support = 0, 1.0
+    for x, y, index in upper:
+        fp_l, fp_w = footprints[index]
+        area = fp_l * fp_w
+        supporters, supported = 0, 0.0
+        for low_x, low_y, low_index in lower[bisect_left(lower_x, x - widest - 1e-9):bisect_left(lower_x, x + fp_l)]:
+            low_l, low_w = footprints[low_index]
+            overlap_x = min(x + fp_l, low_x + low_l) - max(x, low_x)
+            overlap_y = min(y + fp_w, low_y + low_w) - max(y, low_y)
+            if overlap_x > 1e-9 and overlap_y > 1e-9:
+                supported += overlap_x * overlap_y
+                supporters += overlap_x * overlap_y >= _BRIDGE_SHARE * area
+        bridging += supporters >= 2
+        min_support = min(min_support, supported / area)
+    return bridging / len(upper), min_support
+
+
+@lru_cache(maxsize=4096)
+def _best_flip(spots: Spots, footprints: Footprints, length: float, width: float, min_support: float) -> tuple[str, float, float]:
+    """Best way to flip alternate layers: (flip, interlock, min support). Column if nothing helps."""
+    best = ("none", 0.0, 1.0)
+    for flip in ("mirror_length", "mirror_width", "rotate_180"):
+        flipped = _flip_spots(spots, footprints, length, width, flip)
+        up_interlock, up_support = _rest_stats(flipped, spots, footprints)
+        down_interlock, down_support = _rest_stats(spots, flipped, footprints)
+        interlock, support = (up_interlock + down_interlock) / 2, min(up_support, down_support)
+        if support >= min_support - 1e-9 and interlock > best[1] + 1e-9:
+            best = (flip, interlock, support)
+    return best
+
 
 @lru_cache(maxsize=64)
 def _ga_layer(
     length: float,
     width: float,
-    footprints: tuple[tuple[float, float], ...],
+    footprints: Footprints,
     generations: int,
     population: int,
     seed: int,
-) -> tuple[tuple[tuple[float, float, int], ...], tuple[tuple[int, float, float], ...]]:
+    stacking: str = "column",
+    min_support: float = DEFAULT_MIN_SUPPORT,
+) -> tuple[Spots, tuple[tuple[int, float, float, float], ...], int, float]:
     """Genetic search for a single-layer pattern of identical rectangles.
 
     A chromosome holds one gene per case up to the malleable target; each gene picks the case's
     preferred footprint orientation. Decoding places cases in order at the bottom-left-most free
     position (falling back to the other orientation), which can produce interlocking, non-guillotine
-    patterns. Objective = placed - penalty x unplaced. Returns the best spots and the per-generation
-    (generation, best, mean) objective history.
+    patterns. Objective = placed - penalty x unplaced, plus (unless stacking is "column") the
+    interlock of the pattern's best flip; with "no_column" a pattern that can't interlock is ranked
+    below every one that can. Returns the best spots and the per-generation
+    (generation, best objective, mean objective, best interlock) history, the number of distinct
+    patterns decoded, and the elapsed milliseconds.
     """
+    started = time.perf_counter()
     target = int((length * width + 1e-9) // (footprints[0][0] * footprints[0][1]))
     rng = random.Random(seed)
     choices = len(footprints)
-    cache: dict[tuple[int, ...], tuple[float, tuple[tuple[float, float, int], ...]]] = {}
+    cache: dict[tuple[int, ...], tuple[float, Spots, float]] = {}
 
-    def decode(genes: tuple[int, ...]) -> tuple[tuple[float, float, int], ...]:
+    def decode(genes: tuple[int, ...]) -> Spots:
         free = [(0.0, 0.0, length, width)]
         spots: list[tuple[float, float, int]] = []
         for gene in genes:
@@ -445,12 +546,19 @@ def _ga_layer(
             _, x, y, index = best
             spots.append((round(x, 9), round(y, 9), index))
             free = _split_free_rectangles(free, x, y, *footprints[index])
-        return tuple(spots)
+        return tuple(sorted(spots, key=lambda spot: (spot[1], spot[0])))
 
-    def evaluate(genes: tuple[int, ...]) -> tuple[float, tuple[tuple[float, float, int], ...]]:
+    def evaluate(genes: tuple[int, ...]) -> tuple[float, Spots, float]:
         if genes not in cache:
             spots = decode(genes)
-            cache[genes] = (len(spots) - _GA_UNPLACED_PENALTY * (target - len(spots)), spots)
+            objective = len(spots) - _GA_UNPLACED_PENALTY * (target - len(spots))
+            interlock = 0.0
+            if stacking != "column":
+                interlock = _best_flip(spots, footprints, length, width, min_support)[1]
+                objective += _GA_INTERLOCK_WEIGHT * interlock
+                if stacking == "no_column" and interlock <= 0:
+                    objective -= 2 * target + 1
+            cache[genes] = (objective, spots, interlock)
         return cache[genes]
 
     def tournament(scored: list[tuple[float, tuple[int, ...]]]) -> tuple[int, ...]:
@@ -460,12 +568,14 @@ def _ga_layer(
     while len(pop) < population:
         pop.append(tuple(rng.randrange(choices) for _ in range(target)))
 
-    history: list[tuple[int, float, float]] = []
+    history: list[tuple[int, float, float, float]] = []
     for generation in range(generations + 1):
         scored = sorted(((evaluate(genes)[0], genes) for genes in pop), reverse=True)
         best_objective, best_genes = scored[0]
-        history.append((generation, best_objective, sum(score for score, _ in scored) / len(scored)))
-        if len(evaluate(best_genes)[1]) >= target or generation == generations:
+        _, best_spots, best_interlock = evaluate(best_genes)
+        history.append((generation, best_objective, sum(score for score, _ in scored) / len(scored), best_interlock))
+        done = len(best_spots) >= target and (stacking == "column" or best_interlock >= 1 - 1e-9)
+        if done or generation == generations:
             break
         children = [genes for _, genes in scored[:2]]  # elitism
         while len(children) < population:
@@ -482,106 +592,175 @@ def _ga_layer(
             children.append(tuple(child))
         pop = children
 
-    spots = evaluate(best_genes)[1]
-    return tuple(sorted(spots, key=lambda spot: (spot[1], spot[0]))), tuple(history)
+    return evaluate(best_genes)[1], tuple(history), len(cache), (time.perf_counter() - started) * 1000
+
+
+@dataclass(frozen=True)
+class _Options:
+    ga: GASettings | None = DEFAULT_GA
+    stacking: str = DEFAULT_STACKING
+    min_support: float = DEFAULT_MIN_SUPPORT
+
+
+_DEFAULT_OPTIONS = _Options()
 
 
 @dataclass(frozen=True)
 class _LayerPlan:
-    spots: tuple[tuple[float, float, int], ...]
+    spots: Spots
+    footprints: Footprints
     orientations: tuple[tuple[int, int, int], ...]
     layer_height: float
     layers: int
+    flip: str = "none"
+    interlock: float = 0.0
+    min_support: float = 1.0
+    note: str = ""
 
     @property
     def capacity(self) -> int:
         return self.layers * len(self.spots)
 
 
-def _plan_layers(pallet: Pallet, case: Case, ga: GASettings | None = DEFAULT_GA) -> tuple[_LayerPlan | None, list[SolverRun]]:
-    """Pick the orientation family that stacks the most cases within the build height.
+def _stack_plan(
+    spots: Spots,
+    run: SolverRun,
+    footprints: Footprints,
+    orientations: tuple[tuple[int, int, int], ...],
+    layer_height: float,
+    layers: int,
+    deck: tuple[float, float],
+    interlocking: bool,
+    opts: _Options,
+) -> tuple[tuple, _LayerPlan]:
+    """Build a layer plan from a pattern: choose the alternate-layer flip and apply the stacking rule.
+
+    Returns the ranking key (capacity, cases per layer, interlock) and the plan; also records the
+    flip and interlock on ``run``.
+    """
+    flip, interlock, support = "none", 0.0, 1.0
+    if interlocking and spots:
+        flip, interlock, support = _best_flip(spots, footprints, *deck, opts.min_support)
+    run.flip, run.interlock = flip, (interlock if interlocking else None)
+    usable_layers, note = layers, ""
+    if opts.stacking == "no_column" and interlock <= 0 and layers > 1:
+        usable_layers = 1
+        note = ("Column stacking is disallowed and no interlocking pattern keeps every case "
+                f"{opts.min_support:.0%} supported, so the load is limited to one layer.")
+    plan = _LayerPlan(spots, footprints, orientations, layer_height, usable_layers, flip, interlock, support, note)
+    return (plan.capacity, len(spots), interlock), plan
+
+
+def _plan_layers(pallet: Pallet, case: Case, opts: _Options = _DEFAULT_OPTIONS) -> tuple[_LayerPlan | None, list[SolverRun]]:
+    """Pick the orientation family and layer pattern that stack the most cases within the build height.
 
     Orientations are grouped by which case dimension stands vertical, so every layer has one height
-    and a flat top. Each family gets a layer pattern from the block packer and, when it falls short
-    of the malleable bound, from the GA; the better pattern is repeated for as many layers as fit.
-    Ties favour more cases per layer. If no orientation fits the height, the best layer is returned
-    with ``layers=0`` so the caller can report the height violation. Also returns a log of every
-    solver run.
+    and a flat top. Each family gets a layer pattern from the block packer and, where it can help,
+    from the GA. Unless stacking is "column", alternate layers use the pattern's best flip (mirror or
+    180 degree turn) when that makes cases bridge the seams below while keeping each case at least
+    ``min_support`` supported. With "no_column", a pattern that can't interlock is limited to one
+    layer. Candidates rank by capacity, then cases per layer, then interlock. If no orientation fits
+    the height, the best layer is returned with ``layers=0`` so the caller can report the height
+    violation. Also returns a log of every solver run.
     """
     limit = pallet.load_height_limit
     groups: dict[float, list[tuple[int, int, int]]] = {}
     for orientation in _orientations_for(case):
         groups.setdefault(round(case.oriented_dimensions(orientation)[2], 9), []).append(orientation)
 
-    best: tuple[_LayerPlan, SolverRun] | None = None
+    best: tuple[tuple, _LayerPlan, SolverRun] | None = None
     runs: list[SolverRun] = []
     length, width = round(pallet.length, 9), round(pallet.width, 9)
     for layer_height, orientations in groups.items():
-        footprints: list[tuple[float, float]] = []
+        footprint_list: list[tuple[float, float]] = []
         footprint_orientations: list[tuple[int, int, int]] = []
         for orientation in orientations:
             fp_l, fp_w, _ = case.oriented_dimensions(orientation)
             footprint = (round(fp_l, 9), round(fp_w, 9))
-            if footprint not in footprints:
-                footprints.append(footprint)
+            if footprint not in footprint_list:
+                footprint_list.append(footprint)
                 footprint_orientations.append(orientation)
+        footprints = tuple(footprint_list)
         layers = 1 if limit is None else int((limit + 1e-9) // layer_height)
         target = int((length * width + 1e-9) // (footprints[0][0] * footprints[0][1]))
         family = f"{layer_height:g} {pallet.unit} tall layers"
 
-        spots = _block_layout(length, width, tuple(footprints))
-        candidates = [(spots, SolverRun("Block packer", family, len(spots), target, layers,
-                                        note="Recursive guillotine search over block patterns."))]
-        if ga is not None:
+        # Interlock only matters when layers actually stack on each other.
+        interlocking = opts.stacking != "column" and layers >= 2
+        stack_args = (footprints, tuple(footprint_orientations), layer_height, layers, (length, width),
+                      interlocking, opts)
+
+        block_spots, states, cuts_tried, block_ms = _block_layout(length, width, footprints)
+        block_run = SolverRun("Block packer", family, len(block_spots), target, layers,
+                              note="Recursive guillotine search over block patterns.",
+                              iterations=states, evaluations=cuts_tried, elapsed_ms=block_ms)
+        candidates = [(*_stack_plan(block_spots, block_run, *stack_args), block_run)]
+        runs.append(block_run)
+
+        if opts.ga is not None:
+            reaches_bound = len(block_spots) >= target
+            fully_interlocked = not interlocking or (block_run.interlock or 0.0) >= 1 - 1e-9
             skip = None
-            if len(spots) >= target:
-                skip = "Skipped: the block packer already reaches the bound."
+            if reaches_bound and fully_interlocked:
+                skip = ("Skipped: the block packer already reaches the bound"
+                        + (" with full interlock." if interlocking else "."))
             elif len(footprints) < 2:
                 skip = "Skipped: a square footprint has only one orientation."
             elif target > _GA_MAX_TARGET:
                 skip = f"Skipped: target of {target} cases per layer exceeds the GA limit of {_GA_MAX_TARGET}."
             if skip:
-                runs_note = SolverRun("Genetic algorithm", family, 0, target, layers, ran=False, note=skip)
-                candidates.append(((), runs_note))
+                runs.append(SolverRun("Genetic algorithm", family, 0, target, layers, ran=False, note=skip))
             else:
-                ga_spots, history = _ga_layer(length, width, tuple(footprints), *ga)
-                note = f"{len(history) - 1} generations, population {ga[1]}, seed {ga[2]}."
-                candidates.append((ga_spots, SolverRun("Genetic algorithm", family, len(ga_spots), target, layers,
-                                                       note=note, history=history)))
+                # Optimize count (+ interlock when stacking interlocks). With interlock required, a
+                # second pass that penalizes non-interlocking patterns runs only if the first found none.
+                passes = ["interlock" if interlocking else "column"]
+                for stacking in passes:
+                    ga_spots, history, decoded, ga_ms = _ga_layer(
+                        length, width, footprints, *opts.ga, stacking, opts.min_support)
+                    goal = {"column": "count", "interlock": "count, then interlock",
+                            "no_column": "count with interlock required"}[stacking]
+                    note = f"Population {opts.ga[1]}, seed {opts.ga[2]}; objective: {goal}."
+                    name = "Genetic algorithm" if stacking != "no_column" else "Genetic algorithm (interlock required)"
+                    ga_run = SolverRun(name, family, len(ga_spots), target, layers, note=note, history=history,
+                                       iterations=len(history) - 1, evaluations=decoded, elapsed_ms=ga_ms)
+                    candidates.append((*_stack_plan(ga_spots, ga_run, *stack_args), ga_run))
+                    runs.append(ga_run)
+                    if opts.stacking == "no_column" and interlocking and stacking == "interlock" and not ga_run.interlock:
+                        passes.append("no_column")
 
-        family_spots, family_run = candidates[0]
-        for cand_spots, run in candidates[1:]:
-            if len(cand_spots) > len(family_spots):  # the GA must strictly beat the block packer
-                family_spots, family_run = cand_spots, run
-        runs.extend(run for _, run in candidates)
-        if not family_spots:
+        # The GA must strictly beat the block packer on (capacity, cases per layer, interlock).
+        key, plan, run = candidates[0]
+        for cand_key, cand_plan, cand_run in candidates[1:]:
+            if cand_key > key:
+                key, plan, run = cand_key, cand_plan, cand_run
+        if not plan.spots:
             continue
-        plan = _LayerPlan(family_spots, tuple(footprint_orientations), layer_height, layers)
-        if best is None or (plan.capacity, len(plan.spots)) > (best[0].capacity, len(best[0].spots)):
-            best = (plan, family_run)
+        if best is None or key > best[0]:
+            best = (key, plan, run)
 
     if best is None:
         return None, runs
-    best[1].selected = True
-    return best[0], runs
+    best[2].selected = True
+    return best[1], runs
 
 
 def _pack_layer(
-    pallet: Pallet, cases: Sequence[Case], ga: GASettings | None = DEFAULT_GA
+    pallet: Pallet, cases: Sequence[Case], opts: _Options = _DEFAULT_OPTIONS
 ) -> tuple[list[Placement], list[str], _LayerPlan | None, list[SolverRun]]:
     """Stack identical cases in flat layers; returns placements, violations, the plan and solver log."""
-    plan, runs = _plan_layers(pallet, cases[0], ga)
+    plan, runs = _plan_layers(pallet, cases[0], opts)
     if plan is None:
         return [], ["No cases could be placed on the pallet."], None, runs
 
     per_layer = len(plan.spots)
-    # Stack whole layers; a partial top layer fills from the origin outward. With no layer fitting
-    # the height, still place one layer so the height check explains why the load fails.
+    alternate = _flip_spots(plan.spots, plan.footprints, round(pallet.length, 9), round(pallet.width, 9), plan.flip)
+    # Stack whole layers, flipping every other one; a partial top layer fills in pattern order. With
+    # no layer fitting the height, still place one layer so the height check explains the failure.
     available_layers = max(plan.layers, 1)
     placements: list[Placement] = []
     for index, item in enumerate(cases[: per_layer * available_layers]):
         layer, slot = divmod(index, per_layer)
-        x, y, footprint_index = plan.spots[slot]
+        x, y, footprint_index = (alternate if layer % 2 else plan.spots)[slot]
         orientation = plan.orientations[footprint_index]
         fp_l, fp_w, height = item.oriented_dimensions(orientation)
         placements.append(Placement(item.name, x, y, layer * plan.layer_height, fp_l, fp_w, height, orientation))
@@ -599,6 +778,8 @@ def maximize_case_count(
     optimization_generations: int = DEFAULT_GA[0],
     optimization_population: int = DEFAULT_GA[1],
     optimization_seed: int = DEFAULT_GA[2],
+    stacking: str = DEFAULT_STACKING,
+    min_support: float = DEFAULT_MIN_SUPPORT,
 ) -> tuple[int, LayoutResult]:
     """Return the maximum number of identical cases that fit on a pallet.
 
@@ -606,7 +787,8 @@ def maximize_case_count(
     by the weight, volume and plan-area limits. Returns the count and the layout that achieves it.
     ``progress_callback`` is kept for compatibility and is called once with the final result.
     With ``optimize`` the GA searches for a denser layer wherever the block packer falls short of the
-    malleable bound; ``LayoutResult.solver_runs`` records what each solver found.
+    malleable bound; ``LayoutResult.solver_runs`` records what each solver found. ``stacking`` and
+    ``min_support`` control interlocking (see ``solve_pallet_layout``).
     """
 
     case = _coerce_case(case, pallet.unit)
@@ -617,14 +799,15 @@ def maximize_case_count(
     if case.quantity <= 0:
         raise ValueError("Case quantity must be positive for max-case search.")
 
-    ga = (optimization_generations, optimization_population, optimization_seed) if optimize else None
     solve_options = {
         "optimize": optimize,
         "optimization_generations": optimization_generations,
         "optimization_population": optimization_population,
         "optimization_seed": optimization_seed,
+        "stacking": stacking,
+        "min_support": min_support,
     }
-    plan, _ = _plan_layers(pallet, case, ga)
+    plan, _ = _plan_layers(pallet, case, _options(**solve_options))
     count = plan.capacity if plan is not None else 0
     if pallet.max_weight is not None and case.weight > 0:
         count = min(count, int(pallet.max_weight // case.weight))
@@ -645,11 +828,27 @@ def maximize_case_count(
     return count, result
 
 
+def _options(
+    optimize: bool,
+    optimization_generations: int,
+    optimization_population: int,
+    optimization_seed: int,
+    stacking: str,
+    min_support: float,
+) -> _Options:
+    if stacking not in STACKING_MODES:
+        raise ValueError(f"Unknown stacking mode {stacking!r}. Use one of: {', '.join(STACKING_MODES)}.")
+    if not 0.0 <= min_support <= 1.0:
+        raise ValueError("min_support must be between 0 and 1.")
+    ga = (optimization_generations, optimization_population, optimization_seed) if optimize else None
+    return _Options(ga, stacking, min_support)
+
+
 def _explain_single_case(pallet: Pallet, case: Case, solve_options: dict | None = None) -> tuple[int, LayoutResult]:
     result = solve_pallet_layout(pallet, [replace(case, quantity=1)], **(solve_options or {}))
     violations = result.violations or ["No cases fit on this pallet."]
     return 0, LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, violations, solver_runs=result.solver_runs,
-                           volume_bound=result.volume_bound)
+                           volume_bound=result.volume_bound, stacking=result.stacking)
 
 
 def _single_case_type(cases: Sequence[Case]) -> bool:
@@ -663,9 +862,9 @@ def _evaluate_load(
     pallet: Pallet,
     cases: Sequence[Case],
     violations: list[str] | None = None,
-    ga: GASettings | None = DEFAULT_GA,
+    opts: _Options = _DEFAULT_OPTIONS,
 ) -> LayoutResult:
-    placements, packing_violations, plan, runs = _pack_layer(pallet, cases, ga)
+    placements, packing_violations, plan, runs = _pack_layer(pallet, cases, opts)
     violations = [*(violations or []), *packing_violations]
 
     overhang = 0.0
@@ -710,6 +909,11 @@ def _evaluate_load(
         volume_utilization=volume_utilization,
         solver_runs=runs,
         volume_bound=volume_bound,
+        stacking=opts.stacking,
+        flip=plan.flip if plan else "none",
+        interlock=plan.interlock if plan else 0.0,
+        min_support=plan.min_support if plan else 1.0,
+        stacking_note=plan.note if plan else "",
     )
 
 
@@ -741,12 +945,17 @@ def solve_pallet_layout(
     optimization_generations: int = DEFAULT_GA[0],
     optimization_population: int = DEFAULT_GA[1],
     optimization_seed: int = DEFAULT_GA[2],
+    stacking: str = DEFAULT_STACKING,
+    min_support: float = DEFAULT_MIN_SUPPORT,
 ) -> LayoutResult:
     """Stack the given identical cases in flat layers on the pallet.
 
     Each layer pattern comes from the block packer and, with ``optimize``, the GA layer search
-    (used wherever the block packer falls short of the malleable bound). Supports US and metric
-    units and the standard CHEP/GMA/EUR pallet definitions.
+    (used wherever it can add cases or, when interlocking, stability). ``stacking`` is "column"
+    (same pattern every layer), "interlock" (flip alternate layers when that bridges seams; the
+    default) or "no_column" (interlock required, otherwise one layer). ``min_support`` is the
+    smallest share of a case's base that must rest on cases below. Supports US and metric units and
+    the standard CHEP/GMA/EUR pallet definitions.
     """
 
     if not isinstance(pallet, Pallet):
@@ -795,8 +1004,9 @@ def solve_pallet_layout(
 
     if not expanded_cases:
         return LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases available to place."])
-    ga = (optimization_generations, optimization_population, optimization_seed) if optimize else None
-    return _evaluate_load(pallet, expanded_cases, violations, ga)
+    opts = _options(optimize, optimization_generations, optimization_population, optimization_seed,
+                    stacking, min_support)
+    return _evaluate_load(pallet, expanded_cases, violations, opts)
 
 
 build_layout = solve_pallet_layout

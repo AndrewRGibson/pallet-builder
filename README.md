@@ -174,10 +174,11 @@ A sensible phased strategy is:
 
 This repo implements steps 1–3 and part of step 5 for a single repeated case type:
 - an exact-geometry block packer for each layer,
-- a GA layer search that improves on it where it falls short of the bound,
-- flat layers stacked up to the max build height within the weight and other load limits.
+- a GA layer search that improves on it where it falls short of the bound or where a better-interlocking pattern exists,
+- flat layers stacked up to the max build height within the weight and other load limits,
+- column or interlocked stacking (alternate layers flipped), with a minimum-support rule.
 
-Step 4 (interlocking or column rules, and stability checks) is still open.
+Still open: load stability checks beyond support (center of gravity, crush limits).
 
 ## Current solver behavior
 
@@ -206,19 +207,36 @@ Two solvers can build a layer, and the solver keeps whichever layer holds more c
 
 `max_weight` caps the total case weight, `max_volume` caps the total case volume, and `max_plan_area` caps the combined case footprint. `maximize_case_count` takes the smaller of layers × cases per layer and those caps. A run that breaks a limit is reported as infeasible, with a reason for each limit it breaks.
 
+### Stacking: column or interlocked
+
+Repeating one pattern in every layer stacks the cases in columns, which are weak because every seam runs the full height. The `stacking` option controls this:
+
+| Mode | Behavior |
+|---|---|
+| `"interlock"` (default) | Alternate layers use the pattern's best **flip**: mirrored along the length, mirrored along the width, or rotated 180°. Flipping is chosen only when it makes cases bridge the seams below. It never costs a case: the count is maximized first, and interlock only breaks ties. |
+| `"column"` | Every layer uses the same pattern. |
+| `"no_column"` | Interlock is required. The GA first searches on the normal objective; if its best pattern can't interlock, a second pass penalizes non-interlocking patterns and may trade cases for interlock. If nothing interlocks, the load is limited to one layer and `stacking_note` says why. |
+
+How it's measured:
+- **Interlock** is the share of cases resting on two or more cases in the layer below, where each support carries at least 10% of the case.
+- **Support** is the share of a case's base that rests on cases below. A flip is only allowed if every case keeps at least `min_support` (default 0.7). This stops a flip from leaving cases hanging over a gap at the pallet edge.
+- **Example:** across 209 case sizes on CHEP at 60", interlocking (without losing cases) was found for 172. Flipping the block pattern was enough for 60; the GA found an interlocking pattern for 112.
+
 ### Solver log
 
 Every result records what each solver did in `LayoutResult.solver_runs`, a list of `SolverRun` entries:
 - solver name, layer family (e.g. "8 in tall layers"), cases per layer and the bound,
 - whether the solver ran or was skipped (with the reason), and whether its layer was used,
-- for the GA, a `(generation, best objective, mean objective)` history.
+- the chosen flip and interlock,
+- work done: `iterations` (block packer: region states solved; GA: generations) and `evaluations` (block packer: cuts tried; GA: distinct patterns decoded), plus `elapsed_ms`, measured on the first solve since results are cached,
+- for the GA, a `(generation, best objective, mean objective, best interlock)` history.
 
 ### API
 
 - `Case`: dimensions, weight, quantity, unit, and `this_side_up`.
 - `Pallet`: deck length and width, `height` (max build height including the deck), `deck_height`, unit, and optional `max_weight`, `max_volume` and `max_plan_area`. `Pallet.from_standard(name, unit=..., max_build_height=...)` loads the CHEP, GMA, EUR_1200X800 and EUR_1000X1200 presets, and "EURO" is an alias for EUR_1200X800. Preset max weights are in lb for CHEP/GMA and kg for EUR. `Pallet` doesn't store a weight unit, so case weights must use the same unit.
-- `solve_pallet_layout(pallet, cases, optimize=True, optimization_generations=40, optimization_population=24, optimization_seed=0)`: places the given cases and returns a `LayoutResult`. Pass `optimize=False` to use the block packer only.
-- `maximize_case_count(pallet, case, optimize=True, ...)`: returns the largest count that fits, with its `LayoutResult`. It takes the same GA options.
+- `solve_pallet_layout(pallet, cases, optimize=True, optimization_generations=40, optimization_population=24, optimization_seed=0, stacking="interlock", min_support=0.7)`: places the given cases and returns a `LayoutResult`. Pass `optimize=False` to use the block packer only.
+- `maximize_case_count(pallet, case, optimize=True, ..., stacking="interlock", min_support=0.7)`: returns the largest count that fits, with its `LayoutResult`. It takes the same options.
 - `optimize_layout(pallet, cases, generations=..., population_size=..., seed=...)`: shorthand for `solve_pallet_layout` with the GA on.
 - `LayoutResult` contains:
   - `placements`: x, y, z, size and orientation for each case, with z measured from the top of the deck.
@@ -227,6 +245,7 @@ Every result records what each solver did in `LayoutResult.solver_runs`, a list 
   - `utilization`: deck coverage of the base layer.
   - `volume_utilization`: case volume as a share of the space above the deck.
   - `volume_bound`: the malleable bound for the whole pallet.
+  - `stacking`, `flip`, `interlock`, `min_support` and `stacking_note`: how the layers are stacked.
   - `solver_runs`: the solver log.
   - `total_weight`.
 
@@ -262,29 +281,38 @@ The app finds the most cases that fit and re-solves whenever an input changes. E
   - Max volume and max plan area, under "More limits".
   - Choosing a preset fills in a typical build height (60 in or 180 cm). Editing a pallet dimension switches the preset to "Custom". A limit of 0 means no limit.
 - **Case**: length, width, height and weight, plus *This side up*.
-- **Solve**: the GA layer search switch, with its generations, population and seed.
+- **Solve**:
+  - Stacking: interlock when possible, column, or no column stacking; plus the minimum support.
+  - The GA layer search switch, with its generations, population and seed.
+  - Settings that don't apply are greyed out rather than hidden, so their values are kept.
+- **Sensitivity**: re-solves with case length, width and height (each alone, then all three together) increased and reduced. Steps are a fixed amount (default 0.2 in / 0.5 cm) or a percentage (default 2%), with 1–5 steps each way.
 
-The results area shows:
+The results area is split 50:50 between the 3D view and the results:
 
 - **Headline**: the case count and layer breakdown, e.g. "96 cases fit · 6 layers × 16".
 - **3D view**: an interactive Plotly model of the built pallet. Drag to spin (turntable rotation, so the pallet stays upright), scroll to zoom, and use the Iso, Front, Side and Top buttons to reset the viewpoint. The orbital-rotation and pan tools are removed. The deck is brown, layers alternate shades, and red dashes mark the max build height. Loads over 6,000 cases are drawn as one block per layer.
-- **Layer plan**: a 2D view of the layer pattern. Rotated cases are highlighted.
-- **Metrics**: cases, malleable bound, layers, cube use, deck coverage, load weight, build height (deck + load) and headroom.
+- **Metrics**: cases, malleable bound, layers, cube use, deck coverage, load weight, build height (deck + load), headroom, interlock and minimum support. A caption names the stacking and flip, e.g. "even layers rotated 180°".
 - **Limit**: what stops the count going higher (pallet space, max weight, max volume or max plan area), or why a run is infeasible.
 - **Solver status**:
-  - A table of every solver run: layer family, cases per layer, the bound, whether it was used, and notes (for example why the GA was skipped).
-  - When the GA runs, a chart of its best and mean objective per generation, with the bound (the optimum) and the block packer's score as reference lines.
-- **Tabs**: a placement table (layer and x/y/z for each case) and a JSON export of every input and the full layout.
+  - A table of every solver run, with the total solve time: layer family, cases per layer, the bound, interlock, iterations, evaluations, time, whether it was used, and notes (for example why the GA was skipped).
+  - When the GA runs, a chart of its best and mean objective per generation, plus best interlock on a second axis when stacking interlocks. The bound and the block packer's score are drawn as reference lines.
+- **Tabs**:
+  - **Placements**: the layer, pattern (A or flipped B), x/y/z and size for each case. Columns fit their content.
+  - **Sensitivity**: case counts for each size change. Gains are green and losses red, with a chart against the base.
+  - **Export**:
+    - **Excel**: Summary, Placements, Solver runs, GA history and Sensitivity sheets.
+    - **CSV**: the placement grid.
+    - **JSON**: everything, including the inputs.
 
 ## Recommendations for future versions
 
-- **Interlocking layers**: alternate the pattern between layers (column vs. interlocked stacking) for load stability.
+- **More interlock options**: patterns that alternate between two different layouts (not just flips), and user-set interlock targets.
 - **Exact layer bounds**: the GA narrows the gap to the malleable bound but can't prove optimality. An exact 2D solver (for example CP-SAT) could certify the best layer for awkward case sizes.
 - **Stability checks**: center-of-gravity and load-distribution checks, and a per-case crush or max-stack-weight limit.
-- **Weighted objective**: tunable coefficients to trade density against stability.
+- **Weighted objective**: tunable coefficients to trade density against stability, beyond the current count-first ranking.
 - **Mixed loads**: support for more than one case type per pallet.
 - **Export**: printable loading instructions (a layer sheet) alongside the JSON.
 
 ## Summary
 
-This is a real-world rectangular packing problem with strong operational constraints. The project deliberately handles one case type per pallet run, which keeps the model easy to reason about, validate and present. Within that scope, it packs each layer with block patterns, improves on them with a GA that targets the malleable bound, stacks flat layers to the max build height, respects weight, volume and area limits, explains what limits each result and which solver produced it, and shows the built pallet in an interactive 3D view.
+This is a real-world rectangular packing problem with strong operational constraints. The project deliberately handles one case type per pallet run, which keeps the model easy to reason about, validate and present. Within that scope, it packs each layer with block patterns, improves on them with a GA that targets the malleable bound, stacks flat layers to the max build height (interlocked by flipping alternate layers where that helps), respects weight, volume and area limits, explains what limits each result and which solver produced it, shows the built pallet in an interactive 3D view, and runs a case-size sensitivity analysis.
