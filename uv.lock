@@ -747,7 +747,7 @@ wheels = [
 
 [[package]]
 name = "pallet-builder"
-version = "0.1.0"
+version = "0.1.9"
 source = { editable = "." }
 dependencies = [
     { name = "matplotlib" },

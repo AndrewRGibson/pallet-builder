@@ -1,3 +1,4 @@
+from ._version import get_version
 from .solver import (
     STANDARD_PALLETS,
     Case,
@@ -30,4 +31,4 @@ __all__ = [
     "solve_pallet_layout",
 ]
 
-__version__ = "0.1.0"
+__version__ = get_version()

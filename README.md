@@ -12,6 +12,8 @@ uv run pytest                    # run the test suite
 
 The solver packs each layer with exact block patterns and stacks flat layers up to the max build height, including the pallet deck. See [Current solver behavior](#current-solver-behavior) and [Streamlit UI](#streamlit-ui) for details.
 
+**Versioning:** the version is `0.1.<commit count>`. `pallet_builder.__version__` and the app header read the count from git, so they stay current automatically. The static `version` in `pyproject.toml` (used for packaging) must be bumped to the new count in every commit.
+
 ## Problem framing
 
 A pallet build is effectively a constrained packing problem. In its simplest form it is a 2D rectangular packing problem on the pallet footprint, with a 3D extension once stacking height, stability, and load limits are included. Because this version is intentionally single-case, the optimization problem is narrowed to arranging repeated copies of the same case type efficiently while respecting physical, operational, and safety constraints.

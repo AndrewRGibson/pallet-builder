@@ -11,12 +11,13 @@ from pallet_builder import (
     STANDARD_PALLETS,
     Case,
     Pallet,
+    __version__,
     convert_length,
     maximize_case_count,
     solve_pallet_layout,
 )
 
-APP_VERSION = "0.1.0"
+APP_VERSION = __version__
 LENGTH_UNITS = ["in", "mm", "cm", "m", "ft"]
 WEIGHT_UNITS = {"lb": 0.45359237, "kg": 1.0}  # kilograms per unit
 # Typical max build heights (floor to top of load, including the pallet) applied with a preset.
