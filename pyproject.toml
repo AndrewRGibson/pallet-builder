@@ -1,6 +1,6 @@
 [project]
 name = "pallet-builder"
-version = "0.1.17"  # 0.1.<commit count>; the runtime version is read from git
+version = "0.1.18"  # 0.1.<commit count>; the runtime version is read from git
 description = "Single-case pallet loading optimizer with a Streamlit planner UI"
 readme = "README.md"
 license = { text = "MIT" }

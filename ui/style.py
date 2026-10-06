@@ -17,7 +17,30 @@ STREAMLIT_TEST_IDS = (
     "stSelectbox",
     "stWidgetLabel",
     "stMetricValue",
+    "stElementContainer",
 )
+
+# The page title's class; the CSS pins the title's block and the tab row while scrolling.
+TITLE_CLASS = "pallet-builder-title"
+# Streamlit's own toolbar is 3.75rem tall and sits over the top of the page.
+TOOLBAR = "3.75rem"
+TITLE_HEIGHT = "3.1rem"
+BACKGROUND = {"light": "#ffffff", "dark": "#0e1117"}  # Streamlit's default theme backgrounds
+
+STICKY_CSS = """
+<style>
+    /* Pinned header: the title, then the tab row, stay visible while scrolling. */
+    [data-testid="stElementContainer"]:has(.__TITLE__) {
+        position: sticky; top: __TOOLBAR__; z-index: 991; background: __BG__;
+        height: __TITLE_HEIGHT__; display: flex; align-items: center;
+    }
+    .__TITLE__ { font-size: 1.75rem; font-weight: 700; line-height: 1.2; }
+    /* The main tab row (its parent holds the tab content too, so it has room to stick). */
+    .st-key-main_tab > div > [role="tablist"] {
+        position: sticky; top: calc(__TOOLBAR__ + __TITLE_HEIGHT__); z-index: 990; background: __BG__;
+    }
+</style>
+"""
 
 CSS = """
 <style>
@@ -62,5 +85,8 @@ CSS = """
 """
 
 
-def apply() -> None:
-    st.markdown(CSS, unsafe_allow_html=True)
+def apply(theme: str | None = "light") -> None:
+    background = BACKGROUND.get(theme or "light", BACKGROUND["light"])
+    sticky = (STICKY_CSS.replace("__TITLE__", TITLE_CLASS).replace("__TOOLBAR__", TOOLBAR)
+              .replace("__TITLE_HEIGHT__", TITLE_HEIGHT).replace("__BG__", background))
+    st.markdown(CSS + sticky, unsafe_allow_html=True)

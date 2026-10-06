@@ -16,15 +16,18 @@ TABS = ["Overview", "Input", "Summary", "3D view", "Placements", "By iteration",
 WEIGHT_UNIT_FOR = {"in": "lb", "cm": "kg"}
 
 st.set_page_config(page_title="Pallet Builder", page_icon="\U0001F4E6", layout="wide")
-style.apply()
+style.apply(st.context.theme.type)
 state.init_state()
 
-st.markdown(f"## \U0001F4E6 Pallet Builder <span style='font-size:0.8rem;opacity:0.6'>v{__version__}</span>",
+# The title and the tab row stay pinned at the top while the page scrolls (see ui/style.py).
+# A styled div rather than a heading: Streamlit rewrites heading ids, and the CSS finds the title by class.
+st.markdown(f"<div class='{style.TITLE_CLASS}'>\U0001F4E6 Pallet Builder "
+            f"<span style='font-size:0.8rem;font-weight:400;opacity:0.6'>v{__version__}</span></div>",
             unsafe_allow_html=True)
 # Lazy tabs: on_change="rerun" with a key reruns on tab switches and sets each tab's .open, so the
-# heavier tabs below can skip work while closed. Opens on Summary; Overview explains the app.
+# heavier tabs below can skip work while closed. Opens on Overview, which explains the app.
 overview_tab, input_tab, summary_tab, view_tab, table_tab, iterations_tab, sens_tab = st.tabs(
-    TABS, key="main_tab", on_change="rerun", default="Summary")
+    TABS, key="main_tab", on_change="rerun", default="Overview")
 
 with input_tab:
     strip = st.empty()

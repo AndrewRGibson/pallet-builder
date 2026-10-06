@@ -131,7 +131,7 @@ Run it with:
 uv run streamlit run app.py
 ```
 
-The page has the title and version at the top, then one row of tabs: **Overview, Input, Summary, 3D view, Placements, By iteration, Sensitivity**. It opens on Summary. The app finds the most cases that fit.
+The page has the title and version at the top, then one row of tabs: **Overview, Input, Summary, 3D view, Placements, By iteration, Sensitivity**. It opens on Overview, and the title and tab row stay pinned at the top while you scroll. The app finds the most cases that fit.
 
 - **Solving:** with **Auto-solve** on (the default), the app re-solves whenever an input changes. Turn it off for heavy settings, such as large GA runs, and press **Solve** when ready. A note says when the inputs have changed since the last solve.
 - **Speed:** the heavier tabs (3D view, Placements, By iteration, Sensitivity) only compute while they're open, so an edit costs about 0.1 s on the Summary tab even with sensitivity on.

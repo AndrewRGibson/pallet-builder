@@ -40,11 +40,11 @@ def sensitivity_table(at: AppTest):
     return next((d.value for d in at.dataframe if "Case size" in d.value.columns), None)
 
 
-def test_default_page_opens_on_summary_with_result_strip():
+def test_default_page_opens_on_overview_with_result_strip():
     at = run()
     assert [t.label for t in at.tabs][:7] == ["Overview", "Input", "Summary", "3D view", "Placements",
                                               "By iteration", "Sensitivity"]
-    assert at.session_state["main_tab"] == "Summary"
+    assert at.session_state["main_tab"] == "Overview"
     assert metric(at, "Cases") == "96" and metric(at, "Layers") == "6 layers × 16"
     assert "<b>96 cases</b>" in strip(at) and "limited by pallet space" in strip(at)
 
