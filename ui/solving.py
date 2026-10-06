@@ -11,11 +11,12 @@ from pallet_builder import Case, Pallet, maximize_case_count, solve_pallet_layou
 
 
 @st.cache_data(show_spinner=False, max_entries=256)
-def _solve_cached(pallet_args: dict, case_args: dict, ga: tuple | None, stacking: str, min_support: float):
+def _solve_cached(pallet_args: dict, case_args: dict, ga: tuple | None, stacking: str, min_support: float,
+                  alignment: str):
     started = time.perf_counter()
     pallet = Pallet(**pallet_args)
     case = Case(**case_args)
-    options = {"optimize": ga is not None, "stacking": stacking, "min_support": min_support}
+    options = {"optimize": ga is not None, "stacking": stacking, "min_support": min_support, "alignment": alignment}
     if ga is not None:
         options.update(optimization_generations=ga[0], optimization_population=ga[1], optimization_seed=ga[2],
                        optimization_stall=ga[3])
@@ -37,9 +38,10 @@ class Solved:
     cached: bool  # True when this call reused an earlier result
 
 
-def solve(pallet_args: dict, case_args: dict, ga: tuple | None, stacking: str, min_support: float) -> Solved:
+def solve(pallet_args: dict, case_args: dict, ga: tuple | None, stacking: str, min_support: float,
+          alignment: str) -> Solved:
     started = time.perf_counter()
-    count, result, limit, solve_ms = _solve_cached(pallet_args, case_args, ga, stacking, min_support)
+    count, result, limit, solve_ms = _solve_cached(pallet_args, case_args, ga, stacking, min_support, alignment)
     wall_ms = (time.perf_counter() - started) * 1000
     # A cache hit returns in a fraction of the original solve time.
     return Solved(count, result, limit, solve_ms, cached=wall_ms < 0.5 * solve_ms)

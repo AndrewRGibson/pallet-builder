@@ -6,7 +6,14 @@ import streamlit as st
 
 from pallet_builder import STANDARD_PALLETS
 from ui import files, state
-from ui.state import CUSTOM, GA_STOP_FIXED, GA_STOP_STALL, STACKING_LABELS, UNIT_SYSTEMS
+from ui.state import (
+    ALIGNMENT_LABELS,
+    CUSTOM,
+    GA_STOP_FIXED,
+    GA_STOP_STALL,
+    STACKING_LABELS,
+    UNIT_SYSTEMS,
+)
 
 
 def _section(label: str) -> None:
@@ -78,6 +85,11 @@ def render_inputs() -> None:
                          help="Interlock flips every other layer (mirror or 180° turn) when that makes cases "
                               "bridge the seams below, without costing a case. 'No column stacking' requires interlock "
                               "and may trade cases for it; if no pattern interlocks, the load is limited to one layer.")
+            st.selectbox("Layer alignment", list(ALIGNMENT_LABELS), key="alignment", format_func=ALIGNMENT_LABELS.get,
+                         help="Where layers sit when the pattern doesn't fill the deck exactly. Alternate sides: "
+                              "flipped layers mirror across the deck, so they sit against the opposite sides (the "
+                              "shift helps bridge seams). Flush to two sides: every layer against the same two "
+                              "edges. Centred: every layer centred, splitting the gaps evenly (best balance).")
             # Inputs that don't apply are disabled rather than hidden: Streamlit drops the stored value of a
             # widget that isn't drawn, which would silently reset it to its minimum when shown again.
             st.number_input("Min support (%)", key="min_support", min_value=0.0, max_value=100.0, step=5.0,

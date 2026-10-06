@@ -41,13 +41,13 @@ ss = st.session_state
 current = state.solve_inputs()
 if ss.auto_solve or "solved_inputs" not in ss:
     ss.solved_inputs = current
-pallet_args, case_args, ga_args, stacking, min_support = ss.solved_inputs
+pallet_args, case_args, ga_args, stacking, min_support, alignment = ss.solved_inputs
 stale = ss.solved_inputs != current
 
 try:
     pallet = Pallet(**pallet_args)
     with st.spinner("Solving…"):
-        solved = solve(pallet_args, case_args, ga_args, stacking, min_support)
+        solved = solve(pallet_args, case_args, ga_args, stacking, min_support, alignment)
 except ValueError as exc:
     inputs_tab.render_result(strip, None, stale=stale, error=str(exc))
     for tab in (summary_tab, view_tab, table_tab, iterations_tab, sens_tab):
@@ -64,7 +64,8 @@ inputs_tab.render_result(strip, lambda: results.render_metrics(pallet, solved, c
 with overview_tab:
     results.render_overview()
 
-input_summary = results.input_summary(pallet, case_args, stacking, min_support, ga_args, weight_unit, stale)
+input_summary = results.input_summary(pallet, case_args, stacking, min_support, ga_args, weight_unit, stale,
+                                      alignment)
 
 with summary_tab:
     results.render_input_summary(input_summary)
@@ -91,7 +92,7 @@ if iterations_tab.open:
 
 def solve_variant(variant_case_args: dict) -> tuple:
     """(count, result) for a sensitivity variant, with the same pallet and solver settings."""
-    variant = solve(pallet_args, variant_case_args, ga_args, stacking, min_support)
+    variant = solve(pallet_args, variant_case_args, ga_args, stacking, min_support, alignment)
     return variant.count, variant.result
 
 

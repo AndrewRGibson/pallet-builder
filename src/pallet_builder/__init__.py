@@ -1,5 +1,8 @@
 from ._version import get_version
 from .solver import (
+    ALIGNMENT_LABELS,
+    ALIGNMENT_MODES,
+    DEFAULT_ALIGNMENT,
     DEFAULT_MIN_SUPPORT,
     DEFAULT_STACKING,
     FLIP_LABELS,
@@ -21,6 +24,9 @@ from .solver import (
 )
 
 __all__ = [
+    "ALIGNMENT_LABELS",
+    "ALIGNMENT_MODES",
+    "DEFAULT_ALIGNMENT",
     "DEFAULT_MIN_SUPPORT",
     "DEFAULT_STACKING",
     "FLIP_LABELS",

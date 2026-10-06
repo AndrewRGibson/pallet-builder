@@ -1,8 +1,8 @@
 {
   "format": "pallet-builder-input",
   "version": 1,
-  "name": "CHEP, 9 x 8 x 8 in cases (no column stacking)",
-  "description": "Column stacking is disallowed but no pattern interlocks with 70% support, so the load is limited to one layer.",
+  "name": "CHEP, 14 x 9 x 8 in cases (centred layers)",
+  "description": "14 x 9 cases leave 3 in spare in both directions. With centred alignment every layer sits in the middle of the deck with 1.5 in all round, and alternate layers are mirrored within that outline, so the stack stays centred and still interlocks fully.",
   "units": "US",
   "pallet": {
     "preset": "CHEP",
@@ -17,15 +17,15 @@
     "max_plan_area": null
   },
   "case": {
-    "length": 9.0,
-    "width": 8.0,
+    "length": 14.0,
+    "width": 9.0,
     "height": 8.0,
     "weight": 5.0,
     "this_side_up": true
   },
   "solve": {
-    "stacking": "no_column",
-    "alignment": "alternate",
+    "stacking": "interlock",
+    "alignment": "center",
     "min_support_pct": 70.0,
     "ga": {
       "enabled": true,
@@ -63,15 +63,15 @@
     }
   },
   "expected": {
-    "cases": 25,
-    "layers": 1,
-    "cases_per_layer": 25,
+    "cases": 78,
+    "layers": 6,
+    "cases_per_layer": 13,
     "selected_solver": "Block packer",
-    "interlocked": false,
+    "interlocked": true,
     "limited_by": "space",
-    "mixed_orientations": false,
+    "mixed_orientations": true,
     "tipped": false,
-    "alignment": "alternate",
-    "centred": false
+    "alignment": "center",
+    "centred": true
   }
 }

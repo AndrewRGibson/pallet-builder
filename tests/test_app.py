@@ -167,3 +167,14 @@ def test_result_tabs_start_with_what_was_solved():
     at.number_input(key="c_len").set_value(11.0).run()
     stale = next(m.value for m in at.markdown if "class='input-summary'" in m.value)
     assert "12 \u00d7 10 \u00d7 8 in" in stale and "inputs have changed" in stale  # describes the solved inputs
+
+
+def test_layer_alignment_setting_reaches_the_solver_and_summaries():
+    at = run()
+    at.number_input(key="c_len").set_value(14.0).run()
+    at.number_input(key="c_wid").set_value(9.0).run()
+    at.selectbox(key="alignment").set_value("center").run()
+    assert not at.exception
+    summary = next(m.value for m in at.markdown if "class='input-summary'" in m.value)
+    assert "layers centred," in summary
+    assert any("layers centred where the pattern leaves a gap" in c.value for c in at.caption)

@@ -557,3 +557,47 @@ def test_ga_stall_must_not_be_negative():
 
     with pytest.raises(ValueError, match="optimization_stall"):
         maximize_case_count(Pallet.from_standard("CHEP"), Case("S", 9, 7, 8), optimization_stall=-1)
+
+
+def _layer_gaps(pallet, result, layer_number):
+    z_values = sorted({p.z for p in result.placements})
+    layer = [p for p in result.placements if p.z == z_values[layer_number]]
+    return (round(min(p.x for p in layer), 6), round(pallet.length - max(p.x + p.length for p in layer), 6),
+            round(min(p.y for p in layer), 6), round(pallet.width - max(p.y + p.width for p in layer), 6))
+
+
+def test_centred_alignment_keeps_every_layer_centred():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    _, result = maximize_case_count(chep, Case("C", 14, 9, 8), alignment="center")
+
+    assert result.alignment == "center" and result.interlock > 0
+    for layer in range(result.layers):
+        left, right, front, back = _layer_gaps(chep, result, layer)
+        assert left == right and front == back, (layer, left, right, front, back)
+    _assert_valid_load(chep, result.placements)
+
+
+def test_corner_alignment_keeps_every_layer_flush_to_two_sides():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    _, result = maximize_case_count(chep, Case("C", 9, 7, 8), alignment="corner")
+
+    assert result.flip != "none"  # flipped layers, yet still in the same corner
+    assert {_layer_gaps(chep, result, layer)[0::2] for layer in range(result.layers)} == {(0.0, 0.0)}
+    _assert_valid_load(chep, result.placements)
+
+
+def test_alternate_alignment_moves_flipped_layers_to_the_opposite_side():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    _, result = maximize_case_count(chep, Case("C", 9, 7, 8), alignment="alternate")
+
+    a_left, a_right, *_ = _layer_gaps(chep, result, 0)
+    b_left, b_right, *_ = _layer_gaps(chep, result, 1)
+    assert (a_left, a_right) == (0.0, 1.0) and (b_left, b_right) == (1.0, 0.0)
+    _assert_valid_load(chep, result.placements)
+
+
+def test_alignment_is_validated():
+    import pytest
+
+    with pytest.raises(ValueError, match="alignment"):
+        maximize_case_count(Pallet.from_standard("CHEP"), Case("A", 9, 7, 8), alignment="diagonal")

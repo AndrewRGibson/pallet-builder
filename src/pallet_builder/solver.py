@@ -229,6 +229,8 @@ class LayoutResult:
     interlock: float = 0.0
     min_support: float = 1.0
     stacking_note: str = ""
+    # Where layers sit when the pattern doesn't fill the deck (see ALIGNMENT_MODES).
+    alignment: str = "alternate"
 
     @property
     def capacity(self) -> int:
@@ -442,6 +444,18 @@ DEFAULT_GA: GASettings = (40, 24, 0, 0)
 # interlock; "no_column" requires interlock and otherwise limits the load to a single layer.
 STACKING_MODES = ("column", "interlock", "no_column")
 DEFAULT_STACKING = "interlock"
+# Layer alignment, when a pattern doesn't fill the deck exactly:
+#   "alternate": layer A flush to one corner; flipped layers mirror across the whole deck, so they sit
+#                against the opposite sides (the shift itself bridges seams);
+#   "corner":    every layer flush to the same two sides (flips mirror within the pattern's own outline);
+#   "center":    every layer centred on the deck (flips mirror within the pattern's own outline).
+ALIGNMENT_MODES = ("alternate", "corner", "center")
+DEFAULT_ALIGNMENT = "alternate"
+ALIGNMENT_LABELS = {
+    "alternate": "alternate sides",
+    "corner": "flush to two sides",
+    "center": "centred",
+}
 # A case above must have at least this share of its base resting on cases below.
 DEFAULT_MIN_SUPPORT = 0.7
 # A case below counts as a support (for interlock) when it carries at least this share of the case above.
@@ -454,16 +468,52 @@ FLIP_LABELS = {
 }
 
 
-def _flip_spots(spots: Spots, footprints: Footprints, length: float, width: float, flip: str) -> Spots:
+def _flip_spots(spots: Spots, footprints: Footprints, length: float, width: float, flip: str,
+                x0: float = 0.0, y0: float = 0.0) -> Spots:
+    """Mirror (or turn 180 degrees) a pattern within the frame starting at (x0, y0) of size length x width."""
     flipped = []
     for x, y, index in spots:
         fp_l, fp_w = footprints[index]
+        # Reflect about the frame's centre line: x' = 2 * centre - x - case length.
         if flip in ("mirror_length", "rotate_180"):
-            x = length - x - fp_l
+            x = 2 * x0 + length - x - fp_l
         if flip in ("mirror_width", "rotate_180"):
-            y = width - y - fp_w
+            y = 2 * y0 + width - y - fp_w
         flipped.append((round(x, 9), round(y, 9), index))
     return tuple(flipped)
+
+
+def _outline(spots: Spots, footprints: Footprints) -> tuple[float, float, float, float]:
+    """The pattern's bounding box: (x0, y0, x1, y1)."""
+    return (min(x for x, _, _ in spots), min(y for _, y, _ in spots),
+            max(x + footprints[i][0] for x, _, i in spots), max(y + footprints[i][1] for _, y, i in spots))
+
+
+def _shift(spots: Spots, dx: float, dy: float) -> Spots:
+    return tuple((round(x + dx, 9), round(y + dy, 9), index) for x, y, index in spots)
+
+
+def _layer_positions(spots: Spots, footprints: Footprints, length: float, width: float, flip: str,
+                     alignment: str) -> tuple[Spots, Spots]:
+    """Where layer A (odd layers) and layer B (even layers) sit on the deck.
+
+    The pattern is first placed per ``alignment`` (flush to the origin corner, or centred). Layer B is
+    layer A flipped: across the whole deck for "alternate" (so B sits against the opposite sides),
+    otherwise within the pattern's own outline (so B keeps A's position on the deck).
+    """
+    if not spots:
+        return spots, spots
+    x0, y0, x1, y1 = _outline(spots, footprints)
+    if alignment == "center":
+        base = _shift(spots, (length - (x1 - x0)) / 2 - x0, (width - (y1 - y0)) / 2 - y0)
+    else:
+        base = _shift(spots, -x0, -y0)
+    if flip == "none":
+        return base, base
+    if alignment == "alternate":
+        return base, _flip_spots(base, footprints, length, width, flip)
+    bx0, by0, bx1, by1 = _outline(base, footprints)
+    return base, _flip_spots(base, footprints, bx1 - bx0, by1 - by0, flip, bx0, by0)
 
 
 def _rest_stats(upper: Spots, lower: Spots, footprints: Footprints) -> tuple[float, float]:
@@ -491,13 +541,17 @@ def _rest_stats(upper: Spots, lower: Spots, footprints: Footprints) -> tuple[flo
 
 
 @lru_cache(maxsize=4096)
-def _best_flip(spots: Spots, footprints: Footprints, length: float, width: float, min_support: float) -> tuple[str, float, float]:
-    """Best way to flip alternate layers: (flip, interlock, min support). Column if nothing helps."""
+def _best_flip(spots: Spots, footprints: Footprints, length: float, width: float, min_support: float,
+               alignment: str = DEFAULT_ALIGNMENT) -> tuple[str, float, float]:
+    """Best way to flip alternate layers: (flip, interlock, min support). Column if nothing helps.
+
+    Layers are scored where they actually sit for the given ``alignment``.
+    """
     best = ("none", 0.0, 1.0)
     for flip in ("mirror_length", "mirror_width", "rotate_180"):
-        flipped = _flip_spots(spots, footprints, length, width, flip)
-        up_interlock, up_support = _rest_stats(flipped, spots, footprints)
-        down_interlock, down_support = _rest_stats(spots, flipped, footprints)
+        base, flipped = _layer_positions(spots, footprints, length, width, flip, alignment)
+        up_interlock, up_support = _rest_stats(flipped, base, footprints)
+        down_interlock, down_support = _rest_stats(base, flipped, footprints)
         interlock, support = (up_interlock + down_interlock) / 2, min(up_support, down_support)
         if support >= min_support - 1e-9 and interlock > best[1] + 1e-9:
             best = (flip, interlock, support)
@@ -515,6 +569,7 @@ def _ga_layer(
     stall: int = 0,
     stacking: str = "column",
     min_support: float = DEFAULT_MIN_SUPPORT,
+    alignment: str = DEFAULT_ALIGNMENT,
 ) -> tuple[Spots, tuple[tuple[int, float, float, float], ...], int, float, str]:
     """Genetic search for a single-layer pattern of identical rectangles.
 
@@ -560,7 +615,7 @@ def _ga_layer(
             objective = len(spots) - _GA_UNPLACED_PENALTY * (target - len(spots))
             interlock = 0.0
             if stacking != "column":
-                interlock = _best_flip(spots, footprints, length, width, min_support)[1]
+                interlock = _best_flip(spots, footprints, length, width, min_support, alignment)[1]
                 objective += _GA_INTERLOCK_WEIGHT * interlock
                 if stacking == "no_column" and interlock <= 0:
                     objective -= 2 * target + 1
@@ -616,6 +671,7 @@ class _Options:
     ga: GASettings | None = DEFAULT_GA
     stacking: str = DEFAULT_STACKING
     min_support: float = DEFAULT_MIN_SUPPORT
+    alignment: str = DEFAULT_ALIGNMENT
 
 
 _DEFAULT_OPTIONS = _Options()
@@ -656,7 +712,7 @@ def _stack_plan(
     """
     flip, interlock, support = "none", 0.0, 1.0
     if interlocking and spots:
-        flip, interlock, support = _best_flip(spots, footprints, *deck, opts.min_support)
+        flip, interlock, support = _best_flip(spots, footprints, *deck, opts.min_support, opts.alignment)
     run.flip, run.interlock = flip, (interlock if interlocking else None)
     usable_layers, note = layers, ""
     if opts.stacking == "no_column" and interlock <= 0 and layers > 1:
@@ -735,7 +791,7 @@ def _plan_layers(pallet: Pallet, case: Case, opts: _Options = _DEFAULT_OPTIONS) 
                 passes = ["interlock" if interlocking else "column"]
                 for stacking in passes:
                     ga_spots, history, decoded, ga_ms, stopped = _ga_layer(
-                        length, width, footprints, *opts.ga, stacking, opts.min_support)
+                        length, width, footprints, *opts.ga, stacking, opts.min_support, opts.alignment)
                     goal = {"column": "count", "interlock": "count, then interlock",
                             "no_column": "count with interlock required"}[stacking]
                     note = (f"Population {opts.ga[1]}, seed {opts.ga[2]}; objective: {goal}; "
@@ -773,14 +829,15 @@ def _pack_layer(
         return [], ["No cases could be placed on the pallet."], None, runs
 
     per_layer = len(plan.spots)
-    alternate = _flip_spots(plan.spots, plan.footprints, round(pallet.length, 9), round(pallet.width, 9), plan.flip)
+    layer_a, layer_b = _layer_positions(plan.spots, plan.footprints, round(pallet.length, 9),
+                                        round(pallet.width, 9), plan.flip, opts.alignment)
     # Stack whole layers, flipping every other one; a partial top layer fills in pattern order. With
     # no layer fitting the height, still place one layer so the height check explains the failure.
     available_layers = max(plan.layers, 1)
     placements: list[Placement] = []
     for index, item in enumerate(cases[: per_layer * available_layers]):
         layer, slot = divmod(index, per_layer)
-        x, y, footprint_index = (alternate if layer % 2 else plan.spots)[slot]
+        x, y, footprint_index = (layer_b if layer % 2 else layer_a)[slot]
         orientation = plan.orientations[footprint_index]
         fp_l, fp_w, height = item.oriented_dimensions(orientation)
         placements.append(Placement(item.name, x, y, layer * plan.layer_height, fp_l, fp_w, height, orientation))
@@ -801,6 +858,7 @@ def maximize_case_count(
     optimization_stall: int = DEFAULT_GA[3],
     stacking: str = DEFAULT_STACKING,
     min_support: float = DEFAULT_MIN_SUPPORT,
+    alignment: str = DEFAULT_ALIGNMENT,
 ) -> tuple[int, LayoutResult]:
     """Return the maximum number of identical cases that fit on a pallet.
 
@@ -828,6 +886,7 @@ def maximize_case_count(
         "optimization_stall": optimization_stall,
         "stacking": stacking,
         "min_support": min_support,
+        "alignment": alignment,
     }
     plan, _ = _plan_layers(pallet, case, _options(**solve_options))
     count = plan.capacity if plan is not None else 0
@@ -858,6 +917,7 @@ def _options(
     optimization_stall: int,
     stacking: str,
     min_support: float,
+    alignment: str = DEFAULT_ALIGNMENT,
 ) -> _Options:
     if stacking not in STACKING_MODES:
         raise ValueError(f"Unknown stacking mode {stacking!r}. Use one of: {', '.join(STACKING_MODES)}.")
@@ -865,8 +925,10 @@ def _options(
         raise ValueError("min_support must be between 0 and 1.")
     if optimization_stall < 0:
         raise ValueError("optimization_stall must be 0 (fixed generations) or a positive number of generations.")
+    if alignment not in ALIGNMENT_MODES:
+        raise ValueError(f"Unknown alignment {alignment!r}. Use one of: {', '.join(ALIGNMENT_MODES)}.")
     ga = (optimization_generations, optimization_population, optimization_seed, optimization_stall) if optimize else None
-    return _Options(ga, stacking, min_support)
+    return _Options(ga, stacking, min_support, alignment)
 
 
 def _explain_single_case(pallet: Pallet, case: Case, solve_options: dict | None = None) -> tuple[int, LayoutResult]:
@@ -939,6 +1001,7 @@ def _evaluate_load(
         interlock=plan.interlock if plan else 0.0,
         min_support=plan.min_support if plan else 1.0,
         stacking_note=plan.note if plan else "",
+        alignment=opts.alignment,
     )
 
 
@@ -975,6 +1038,7 @@ def solve_pallet_layout(
     optimization_stall: int = DEFAULT_GA[3],
     stacking: str = DEFAULT_STACKING,
     min_support: float = DEFAULT_MIN_SUPPORT,
+    alignment: str = DEFAULT_ALIGNMENT,
 ) -> LayoutResult:
     """Stack the given identical cases in flat layers on the pallet.
 
@@ -984,8 +1048,11 @@ def solve_pallet_layout(
     default) or "no_column" (interlock required, otherwise one layer). ``optimization_stall`` > 0
     stops the GA once its best objective hasn't improved for that many generations, with
     ``optimization_generations`` as the upper limit (0 runs a fixed count). ``min_support`` is the
-    smallest share of a case's base that must rest on cases below. Supports US and metric units and
-    the standard CHEP/GMA/EUR pallet definitions.
+    smallest share of a case's base that must rest on cases below. ``alignment`` says where layers sit
+    when the pattern doesn't fill the deck: "alternate" (flipped layers mirror across the deck, so
+    they sit against the opposite sides; the default), "corner" (every layer flush to the same two
+    sides) or "center" (every layer centred). Supports US and metric units and the standard
+    CHEP/GMA/EUR pallet definitions.
     """
 
     if not isinstance(pallet, Pallet):
@@ -1035,7 +1102,7 @@ def solve_pallet_layout(
     if not expanded_cases:
         return LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases available to place."])
     opts = _options(optimize, optimization_generations, optimization_population, optimization_seed,
-                    optimization_stall, stacking, min_support)
+                    optimization_stall, stacking, min_support, alignment)
     return _evaluate_load(pallet, expanded_cases, violations, opts)
 
 

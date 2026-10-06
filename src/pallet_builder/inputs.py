@@ -20,6 +20,7 @@ FORMAT = "pallet-builder-input"
 VERSION = 1
 UNITS = {"US": ("in", "lb"), "Metric": ("cm", "kg")}
 STACKING = ("interlock", "column", "no_column")
+ALIGNMENT = ("alternate", "corner", "center")
 STOP_RULES = ("fixed", "no_improvement")
 SENS_BY = ("fixed", "percent")
 SENS_DIMENSIONS = ("length", "width", "height")
@@ -39,6 +40,7 @@ _DEFAULT: dict[str, Any] = {
     "case": {"length": 12.0, "width": 10.0, "height": 8.0, "weight": 20.0, "this_side_up": True},
     "solve": {
         "stacking": "interlock",
+        "alignment": "alternate",
         "min_support_pct": 70.0,
         "ga": {"enabled": True, "stop_rule": "fixed", "generations": 40, "stall": 25, "population": 24, "seed": 0},
     },
@@ -138,6 +140,7 @@ def validate_document(doc: Any) -> dict[str, Any]:
 
     solve = full["solve"]
     _choice(solve["stacking"], "solve.stacking", STACKING)
+    _choice(solve["alignment"], "solve.alignment", ALIGNMENT)
     solve["min_support_pct"] = _number(solve["min_support_pct"], "solve.min_support_pct", minimum=0, maximum=100)
     ga = solve["ga"]
     ga["enabled"] = _flag(ga["enabled"], "solve.ga.enabled")
@@ -201,5 +204,6 @@ def solver_arguments(doc: dict[str, Any]) -> tuple[dict, dict, dict]:
         "optimization_population": ga["population"], "optimization_seed": ga["seed"],
         "optimization_stall": ga["stall"] if ga["stop_rule"] == "no_improvement" else 0,
         "stacking": solve["stacking"], "min_support": solve["min_support_pct"] / 100,
+        "alignment": solve["alignment"],
     }
     return pallet_kwargs, case_kwargs, options

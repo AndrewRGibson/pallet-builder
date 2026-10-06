@@ -74,6 +74,18 @@ Repeating one pattern in every layer stacks the cases in columns, which are weak
 | `"column"` | Every layer uses the same pattern. |
 | `"no_column"` | Interlock is required. The GA first searches on the normal objective; if its best pattern can't interlock, a second pass penalizes non-interlocking patterns and may trade cases for interlock. If nothing interlocks, the load is limited to one layer and `stacking_note` says why. |
 
+### Layer alignment
+
+When a layer pattern doesn't fill the deck exactly, the `alignment` option says where layers sit:
+
+| Alignment | Layer A | Layer B (when flipped) | Use it for |
+|---|---|---|---|
+| `"alternate"` (default) | Flush to one corner | Mirrored across the whole deck, so it sits against the opposite sides | The most interlocking: the side-to-side shift itself bridges seams |
+| `"corner"` | Flush to two sides | Mirrored within the pattern's own outline, so it stays in the same corner | A load with one clean face on two sides |
+| `"center"` | Centred on the deck | Mirrored within the outline, so it stays centred | Balance: the spare space is split evenly round the edge, keeping the load centred |
+
+Interlock and support are scored where the layers actually sit for the chosen alignment, and the GA optimizes for it. For example, 9 x 7 cases on CHEP interlock 96% with alternate sides and 86% when flush or centred, with the same 168 cases.
+
 How it's measured:
 - **Interlock** is the share of cases resting on two or more cases in the layer below, where each support carries at least 10% of the case.
 - **Support** is the share of a case's base that rests on cases below. A flip is only allowed if every case keeps at least `min_support` (default 0.7). This stops a flip from leaving cases hanging over a gap at the pallet edge.
@@ -92,8 +104,8 @@ Every result records what each solver did in `LayoutResult.solver_runs`, a list 
 
 - `Case`: dimensions, weight, quantity, unit, and `this_side_up`.
 - `Pallet`: deck length and width, `height` (max build height including the deck), `deck_height`, unit, and optional `max_weight`, `max_volume` and `max_plan_area`. `Pallet.from_standard(name, unit=..., max_build_height=...)` loads the CHEP, GMA, EUR_1200X800 and EUR_1000X1200 presets, and "EURO" is an alias for EUR_1200X800. Preset max weights are in lb for CHEP/GMA and kg for EUR. `Pallet` doesn't store a weight unit, so case weights must use the same unit.
-- `solve_pallet_layout(pallet, cases, optimize=True, optimization_generations=40, optimization_population=24, optimization_seed=0, optimization_stall=0, stacking="interlock", min_support=0.7)`: places the given cases and returns a `LayoutResult`. Pass `optimize=False` to use the block packer only. `optimization_stall=N` stops the GA after N generations without improvement (0 = run a fixed number of generations).
-- `maximize_case_count(pallet, case, optimize=True, ..., stacking="interlock", min_support=0.7)`: returns the largest count that fits, with its `LayoutResult`. It takes the same options.
+- `solve_pallet_layout(pallet, cases, optimize=True, optimization_generations=40, optimization_population=24, optimization_seed=0, optimization_stall=0, stacking="interlock", min_support=0.7, alignment="alternate")`: places the given cases and returns a `LayoutResult`. Pass `optimize=False` to use the block packer only. `optimization_stall=N` stops the GA after N generations without improvement (0 = run a fixed number of generations).
+- `maximize_case_count(pallet, case, optimize=True, ..., stacking="interlock", min_support=0.7, alignment="alternate")`: returns the largest count that fits, with its `LayoutResult`. It takes the same options.
 - `optimize_layout(pallet, cases, generations=..., population_size=..., seed=..., stall=...)`: shorthand for `solve_pallet_layout` with the GA on.
 - `pallet_builder.inputs`: read, write and validate `.pallet` input files (see [Input files](#streamlit-ui)).
 - `pallet_builder.insights.sensitivity_insights`: opportunities and risks from a set of solved case sizes.
@@ -104,7 +116,7 @@ Every result records what each solver did in `LayoutResult.solver_runs`, a list 
   - `utilization`: deck coverage of the base layer.
   - `volume_utilization`: case volume as a share of the space above the deck.
   - `volume_bound`: the malleable bound for the whole pallet.
-  - `stacking`, `flip`, `interlock`, `min_support` and `stacking_note`: how the layers are stacked.
+  - `stacking`, `flip`, `interlock`, `min_support`, `stacking_note` and `alignment`: how the layers are stacked.
   - `solver_runs`: the solver log.
   - `total_weight`.
 
@@ -150,6 +162,7 @@ Every input that affects the solve is on the **Input** tab. It's laid out in thr
 - **Case**: length, width, height and weight, plus *This side up*.
 - **Solve**:
   - Stacking: interlock when possible, column, or no column stacking; plus the minimum support.
+  - Layer alignment, when the pattern doesn't fill the deck: alternate sides, flush to two sides, or centred.
   - The GA layer search switch, with its stop rule (fixed generations, or stop after no improvement for N generations with a max), generations, population and seed.
   - Settings that don't apply are greyed out rather than hidden, so their values are kept.
 
@@ -169,7 +182,8 @@ Every input that affects the solve is on the **Input** tab. It's laid out in thr
   - a footprint that only fits rotated,
   - a metric EUR pallet,
   - an infeasible build,
-  - column stacking that reaches the bound.
+  - column stacking that reaches the bound,
+  - centred layers.
 - **Samples as tests:** each sample records its `"expected"` facts, i.e. the claims in its title and description: cases, layers, Ti, the winning solver, whether the layers interlock, what limits the count, mixed orientations and tipping. `tests/test_inputs.py` re-solves every sample and checks them all, so a description can't drift from what the solver does. `scripts/build_samples.py` defines the samples and rebuilds them (`uv run python scripts/build_samples.py`); add a scenario there.
 - **Code:** reading, writing and validation live in `pallet_builder.inputs`. `load`/`loads` validate and fill defaults, `dumps` writes a file, and `solver_arguments` turns a document into `Pallet`, `Case` and solve options.
 

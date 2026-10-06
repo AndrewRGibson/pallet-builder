@@ -25,6 +25,7 @@
   },
   "solve": {
     "stacking": "interlock",
+    "alignment": "alternate",
     "min_support_pct": 70.0,
     "ga": {
       "enabled": true,
@@ -69,6 +70,8 @@
     "interlocked": false,
     "limited_by": "weight",
     "mixed_orientations": false,
-    "tipped": false
+    "tipped": false,
+    "alignment": "alternate",
+    "centred": true
   }
 }

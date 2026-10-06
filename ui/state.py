@@ -18,6 +18,11 @@ LENGTH_KEYS = ("p_len", "p_wid", "p_deck", "p_height", "c_len", "c_wid", "c_hgt"
 WEIGHT_KEYS = ("p_maxw", "c_weight")
 CUSTOM = "Custom"
 GA_STOP_FIXED, GA_STOP_STALL = "Fixed generations", "No improvement"
+ALIGNMENT_LABELS = {
+    "alternate": "Alternate sides (mirror across the deck)",
+    "corner": "Flush to two sides (same corner)",
+    "center": "Centred on the deck",
+}
 STACKING_LABELS = {
     "interlock": "Interlock when possible",
     "column": "Column (same pattern every layer)",
@@ -121,6 +126,7 @@ def document_to_state(doc: dict) -> None:
         c_weight=case["weight"],
         c_tsu=case["this_side_up"],
         stacking=solve["stacking"],
+        alignment=solve["alignment"],
         min_support=solve["min_support_pct"],
         ga_on=ga["enabled"],
         ga_stop=GA_STOP_STALL if ga["stop_rule"] == "no_improvement" else GA_STOP_FIXED,
@@ -155,6 +161,7 @@ def state_to_document() -> dict:
                    "this_side_up": ss.c_tsu}
     doc["solve"] = {
         "stacking": ss.stacking,
+        "alignment": ss.alignment,
         "min_support_pct": ss.min_support,
         "ga": {"enabled": ss.ga_on, "stop_rule": "no_improvement" if ss.ga_stop == GA_STOP_STALL else "fixed",
                "generations": ss.ga_gens, "stall": ss.ga_stall, "population": ss.ga_pop, "seed": ss.ga_seed},
@@ -191,8 +198,8 @@ def preset_label(name: str) -> str:
     return f"{name} · {spec['length']:g}×{spec['width']:g} {spec['unit']}"
 
 
-def solve_inputs() -> tuple[dict, dict, tuple | None, str, float]:
-    """(pallet args, case args, GA settings, stacking, min support) from the current inputs."""
+def solve_inputs() -> tuple[dict, dict, tuple | None, str, float, str]:
+    """(pallet args, case args, GA settings, stacking, min support, alignment) from the current inputs."""
     ss = st.session_state
     length_unit, _ = units()
     ga = (ss.ga_gens, ss.ga_pop, ss.ga_seed, ss.ga_stall if ss.ga_stop == GA_STOP_STALL else 0) if ss.ga_on else None
@@ -205,4 +212,4 @@ def solve_inputs() -> tuple[dict, dict, tuple | None, str, float]:
         "name": "Case", "length": ss.c_len, "width": ss.c_wid, "height": ss.c_hgt, "weight": ss.c_weight,
         "unit": length_unit, "this_side_up": ss.c_tsu,
     }
-    return pallet_args, case_args, ga, ss.stacking, ss.min_support / 100
+    return pallet_args, case_args, ga, ss.stacking, ss.min_support / 100, ss.alignment

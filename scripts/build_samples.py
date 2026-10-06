@@ -87,6 +87,12 @@ SAMPLES = {
         "CHEP built to 12 in, 8 in tall cases (infeasible)",
         "Only 6 in remain above the 6 in deck, so no 8 in case fits; the app explains why.",
         build={"max_height": 12.0}),
+    "11-chep-centred-14x9": doc(
+        "CHEP, 14 x 9 x 8 in cases (centred layers)",
+        "14 x 9 cases leave 3 in spare in both directions. With centred alignment every layer sits in the middle "
+        "of the deck with 1.5 in all round, and alternate layers are mirrored within that outline, so the stack "
+        "stays centred and still interlocks fully.",
+        case={"length": 14.0, "width": 9.0, "height": 8.0, "weight": 5.0}, solve={"alignment": "center"}),
     "10-column-19x7-bound": doc(
         "CHEP, 19 x 7 x 8 in cases (column stacking, GA reaches the bound)",
         "With column stacking the GA's objective is the case count alone. The block packer finds 13 per layer; the "
@@ -118,7 +124,18 @@ def facts(pallet: Pallet, case_kwargs: dict, count: int, result) -> dict:
         "limited_by": limited_by,
         "mixed_orientations": len({(round(p.length, 6), round(p.width, 6)) for p in base_layer}) > 1,
         "tipped": any(p.orientation[2] != 2 for p in result.placements),
+        "alignment": result.alignment,
+        "centred": bool(base_layer) and _centred(pallet, base_layer),
     }
+
+
+def _centred(pallet: Pallet, layer) -> bool:
+    """True when a layer's spare deck space is split evenly on opposite sides."""
+    left = min(p.x for p in layer)
+    right = pallet.length - max(p.x + p.length for p in layer)
+    front = min(p.y for p in layer)
+    back = pallet.width - max(p.y + p.width for p in layer)
+    return abs(left - right) < 1e-6 and abs(front - back) < 1e-6
 
 
 def main() -> None:

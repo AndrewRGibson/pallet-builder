@@ -5,7 +5,7 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import streamlit as st
 
-from pallet_builder import FLIP_LABELS, Pallet
+from pallet_builder import ALIGNMENT_LABELS, FLIP_LABELS, Pallet
 from ui.solving import Solved, limit_text, solver_notes, summarize_violations
 from ui.state import STACKING_LABELS
 
@@ -154,6 +154,8 @@ Save your inputs as a **.pallet** file, or start from a built-in sample.
   stops improving. The best layer wins.
 - **Flat layers**: every case in a layer stands the same way up, so layers = (build height \u2212 deck) \u00f7
   case height, capped by the weight and other limits. *Ti* is the cases per layer and *Hi* the number of layers.
+- **Layer alignment**: when a pattern doesn't fill the deck, layers can sit on *alternate sides* (flipped layers
+  mirror across the deck), *flush to two sides*, or *centred* (best balance).
 - **Interlocking**: alternate layers can be mirrored or turned 180\u00b0 so cases bridge the seams below, as
   long as each case keeps its minimum support. This never costs a case unless you forbid column stacking.
 
@@ -162,7 +164,7 @@ Save your inputs as a **.pallet** file, or start from a built-in sample.
 | Tab | What it shows |
 |---|---|
 | **Overview** | This page: what the app is for, how to use it, and how it solves |
-| **Input** | Load a sample, open or save a .pallet file, or reset to defaults; then every input: units, pallet (preset or custom, deck height, max weight), build limits (max build height including the pallet, optional volume and plan area; blank = no limit), case (size, weight, this side up) and solve settings (Auto-solve, stacking, minimum support, GA stop rule, generations, population, seed); and at the bottom the **Result**: every calculated metric and what limits the count |
+| **Input** | Load a sample, open or save a .pallet file, or reset to defaults; then every input: units, pallet (preset or custom, deck height, max weight), build limits (max build height including the pallet, optional volume and plan area; blank = no limit), case (size, weight, this side up) and solve settings (Auto-solve, stacking, layer alignment, minimum support, GA stop rule, generations, population, seed); and at the bottom the **Result**: every calculated metric and what limits the count |
 | **Summary** | The inputs it was solved from; cases, layers (Hi \u00d7 Ti), max by volume, cube use, deck coverage, load weight, build height, headroom, interlock and minimum support; what limits the count; how the layers stack; solver notes on any limits that applied; and the solver status table (each solver's result, work done and time) |
 | **3D view** | The built pallet: drag to spin, scroll to zoom, buttons for iso, front, side and top views. Brown is the pallet deck, layers alternate shades, red dashes mark the max build height |
 | **Placements** | Every case's number, layer, pattern (A, or B for flipped layers), position (x, y, z), size, and whether it's rotated or tipped. Download as CSV from the table toolbar |
@@ -183,7 +185,7 @@ def _fmt(value: float) -> str:
 
 
 def input_summary(pallet: Pallet, case_args: dict, stacking: str, min_support: float, ga: tuple | None,
-                  weight_unit: str, stale: bool) -> str:
+                  weight_unit: str, stale: bool, alignment: str = "alternate") -> str:
     """What the results on a tab were solved from: pallet, build limits, case and solve settings."""
     unit = pallet.unit
     pallet_text = (f"{pallet.name or 'Custom'} {_fmt(pallet.length)} × {_fmt(pallet.width)} {unit}, "
@@ -200,6 +202,7 @@ def input_summary(pallet: Pallet, case_args: dict, stacking: str, min_support: f
     solve_text = STACKING_LABELS[stacking].split(" (")[0].lower()
     if stacking != "column":
         solve_text += f" (min support {min_support:.0%})"
+    solve_text += f", layers {ALIGNMENT_LABELS[alignment].lower()}"
     if ga is None:
         solve_text += ", GA off"
     else:
@@ -275,7 +278,8 @@ def render_metrics(pallet: Pallet, solved: Solved, case_args: dict, weight_unit:
     if result.layers >= 2:
         layering = ("every layer the same pattern" if result.flip == "none"
                     else f"even layers {FLIP_LABELS[result.flip]}")
-        st.caption(f"Stacking: {STACKING_LABELS[result.stacking].split(' (')[0].lower()} \u00b7 {layering}")
+        st.caption(f"Stacking: {STACKING_LABELS[result.stacking].split(' (')[0].lower()} \u00b7 {layering}"
+                   f" \u00b7 layers {ALIGNMENT_LABELS[result.alignment]} where the pattern leaves a gap")
     if result.stacking_note:
         st.warning(result.stacking_note)
 

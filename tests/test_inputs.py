@@ -67,6 +67,7 @@ def test_partial_file_fills_in_defaults():
         ('{"format": "pallet-builder-input", "case": {"length": -1}}', "case.length must be at least"),
         ('{"format": "pallet-builder-input", "case": {"this_side_up": "yes"}}', "case.this_side_up must be true or false"),
         ('{"format": "pallet-builder-input", "solve": {"stacking": "pyramid"}}', "solve.stacking must be one of"),
+        ('{"format": "pallet-builder-input", "solve": {"alignment": "diagonal"}}', "solve.alignment must be one of"),
         ('{"format": "pallet-builder-input", "build": {"max_height": 5}}', "build.max_height must be greater"),
     ],
 )
