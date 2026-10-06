@@ -10,7 +10,7 @@ import streamlit as st
 
 from pallet_builder import Pallet, __version__
 from ui import inputs_tab, results, sensitivity, state, style, view3d
-from ui.solving import limit_text, solve
+from ui.solving import solve
 
 TABS = ["Overview", "Input", "Summary", "3D view", "Placements", "By iteration", "Sensitivity"]
 WEIGHT_UNIT_FOR = {"in": "lb", "cm": "kg"}
@@ -30,10 +30,11 @@ overview_tab, input_tab, summary_tab, view_tab, table_tab, iterations_tab, sens_
     TABS, key="main_tab", on_change="rerun", default="Overview")
 
 with input_tab:
-    strip = st.empty()
     inputs_tab.render_file_bar()
     st.divider()
     inputs_tab.render_inputs()
+    st.divider()
+    strip = st.empty()  # the Result section, filled in once solved
 
 # Auto-solve uses the current inputs; otherwise the last inputs the Solve button committed.
 ss = st.session_state
@@ -48,32 +49,30 @@ try:
     with st.spinner("Solving…"):
         solved = solve(pallet_args, case_args, ga_args, stacking, min_support)
 except ValueError as exc:
-    inputs_tab.render_result_strip(strip, "", stale=stale, error=str(exc))
-    with summary_tab:
-        st.error(f"Invalid input: {exc}")
+    inputs_tab.render_result(strip, None, stale=stale, error=str(exc))
+    for tab in (summary_tab, view_tab, table_tab, iterations_tab, sens_tab):
+        with tab:
+            st.error(f"Invalid input: {exc}")
     st.stop()
 
 result, count = solved.result, solved.count
 length_unit = pallet.unit
 weight_unit = WEIGHT_UNIT_FOR.get(length_unit, "lb")
-if count:
-    headline = f"<b>{count} cases</b> · {result.layers} layers × {result.cases_per_layer} per layer"
-    if pallet.height is not None:
-        headline += f" · cube use {result.volume_utilization:.0%}"
-    reason = limit_text(solved, pallet)
-    headline += f" · {reason}" if reason else ""
-else:
-    headline = "<b>No cases fit</b> · see the Summary tab for why"
-inputs_tab.render_result_strip(strip, headline, stale=stale)
+inputs_tab.render_result(strip, lambda: results.render_metrics(pallet, solved, case_args, weight_unit),
+                         stale=stale)
 
 with overview_tab:
     results.render_overview()
 
+input_summary = results.input_summary(pallet, case_args, stacking, min_support, ga_args, weight_unit, stale)
+
 with summary_tab:
+    results.render_input_summary(input_summary)
     results.render_summary(pallet, solved, case_args, weight_unit)
 
 if view_tab.open:
     with view_tab:
+        results.render_input_summary(input_summary)
         if result.placements:
             view3d.render(pallet, result)
         else:
@@ -81,10 +80,12 @@ if view_tab.open:
 
 if table_tab.open:
     with table_tab:
+        results.render_input_summary(input_summary)
         results.render_placements(result)
 
 if iterations_tab.open:
     with iterations_tab:
+        results.render_input_summary(input_summary)
         results.render_iterations(result)
 
 
@@ -95,6 +96,7 @@ def solve_variant(variant_case_args: dict) -> tuple:
 
 
 with sens_tab:
+    results.render_input_summary(input_summary)
     # The tab's widgets are always drawn (so they keep their values); the solves only run while it's open.
     sensitivity.render_tab(solve_variant, case_args, (count, result), length_unit, pallet.max_weight,
                            compute=sens_tab.open)

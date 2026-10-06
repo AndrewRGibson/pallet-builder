@@ -1,8 +1,8 @@
 {
   "format": "pallet-builder-input",
   "version": 1,
-  "name": "CHEP, 8 x 5 x 6 in cases (full grid)",
-  "description": "Cases that tile the 40 x 48 deck exactly: 48 per layer, nine layers.",
+  "name": "CHEP, 8 x 5 x 6 in cases (exact tile, interlocked)",
+  "description": "8 x 5 cases tile the 40 x 48 deck exactly: 48 per layer, nine layers. The block packer's uniform grid would stack in columns; the GA finds an equally full pattern mixing both orientations that interlocks fully when every other layer is mirrored.",
   "units": "US",
   "pallet": {
     "preset": "CHEP",
@@ -64,6 +64,11 @@
   "expected": {
     "cases": 432,
     "layers": 9,
-    "cases_per_layer": 48
+    "cases_per_layer": 48,
+    "selected_solver": "Genetic algorithm",
+    "interlocked": true,
+    "limited_by": "space",
+    "mixed_orientations": true,
+    "tipped": false
   }
 }

@@ -2,7 +2,7 @@
   "format": "pallet-builder-input",
   "version": 1,
   "name": "CHEP, 19 x 7 x 8 in cases (column stacking, GA reaches the bound)",
-  "description": "With column stacking the GA's objective is the case count alone; it reaches the malleable bound of 14 per layer.",
+  "description": "With column stacking the GA's objective is the case count alone. The block packer finds 13 per layer; the GA reaches the bound of 14 (deck area / case footprint).",
   "units": "US",
   "pallet": {
     "preset": "CHEP",
@@ -64,6 +64,11 @@
   "expected": {
     "cases": 84,
     "layers": 6,
-    "cases_per_layer": 14
+    "cases_per_layer": 14,
+    "selected_solver": "Genetic algorithm",
+    "interlocked": false,
+    "limited_by": "space",
+    "mixed_orientations": true,
+    "tipped": false
   }
 }

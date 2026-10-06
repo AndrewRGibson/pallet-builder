@@ -134,8 +134,8 @@ that lock together instead of standing in loose columns.
 
 ### How to use it
 
-1. Set everything on the **Input** tab: units, pallet, build limits, case and solver settings. A one-line result
-   at the top of that tab shows the effect of each edit.
+1. Set everything on the **Input** tab: units, pallet, build limits, case and solver settings. The **Result**
+   section at the bottom of that tab shows every calculated metric, so you see the effect of each edit there.
 2. Read the outcome on **Summary**, look at the stack in **3D view**, and get case-by-case positions from
    **Placements**.
 3. Use **Sensitivity** to see whether a slightly different case size would fit more, and how tight your tolerances
@@ -143,7 +143,8 @@ that lock together instead of standing in loose columns.
 
 With **Auto-solve** on, results update as you type; turn it off for heavy settings (for example a long GA run)
 and press **Solve** when ready. The 3D view, Placements, By iteration and Sensitivity tabs only compute while
-they're open, so editing stays quick. Save your inputs as a **.pallet** file, or start from a built-in sample.
+they're open, so editing stays quick. Each result tab starts with a summary of the inputs it was solved from.
+Save your inputs as a **.pallet** file, or start from a built-in sample.
 
 ### How it solves
 
@@ -161,8 +162,8 @@ they're open, so editing stays quick. Save your inputs as a **.pallet** file, or
 | Tab | What it shows |
 |---|---|
 | **Overview** | This page: what the app is for, how to use it, and how it solves |
-| **Input** | The result strip; load a sample, open or save a .pallet file, or reset to defaults; then every input: units, pallet (preset or custom, deck height, max weight), build limits (max build height including the pallet, optional volume and plan area; blank = no limit), case (size, weight, this side up) and solve settings (Auto-solve, stacking, minimum support, GA stop rule, generations, population, seed) |
-| **Summary** | Cases, layers (Hi \u00d7 Ti), max by volume, cube use, deck coverage, load weight, build height, headroom, interlock and minimum support; what limits the count; how the layers stack; solver notes on any limits that applied; and the solver status table (each solver's result, work done and time) |
+| **Input** | Load a sample, open or save a .pallet file, or reset to defaults; then every input: units, pallet (preset or custom, deck height, max weight), build limits (max build height including the pallet, optional volume and plan area; blank = no limit), case (size, weight, this side up) and solve settings (Auto-solve, stacking, minimum support, GA stop rule, generations, population, seed); and at the bottom the **Result**: every calculated metric and what limits the count |
+| **Summary** | The inputs it was solved from; cases, layers (Hi \u00d7 Ti), max by volume, cube use, deck coverage, load weight, build height, headroom, interlock and minimum support; what limits the count; how the layers stack; solver notes on any limits that applied; and the solver status table (each solver's result, work done and time) |
 | **3D view** | The built pallet: drag to spin, scroll to zoom, buttons for iso, front, side and top views. Brown is the pallet deck, layers alternate shades, red dashes mark the max build height |
 | **Placements** | Every case's number, layer, pattern (A, or B for flipped layers), position (x, y, z), size, and whether it's rotated or tipped. Download as CSV from the table toolbar |
 | **By iteration** | How the GA's best and average objective (and interlock) improved, generation by generation, against the bound and the block packer's result; or why the GA didn't run |
@@ -177,7 +178,50 @@ def render_overview() -> None:
     st.markdown(_OVERVIEW)
 
 
-def render_summary(pallet: Pallet, solved: Solved, case_args: dict, weight_unit: str) -> None:
+def _fmt(value: float) -> str:
+    return f"{value:,.6g}"
+
+
+def input_summary(pallet: Pallet, case_args: dict, stacking: str, min_support: float, ga: tuple | None,
+                  weight_unit: str, stale: bool) -> str:
+    """What the results on a tab were solved from: pallet, build limits, case and solve settings."""
+    unit = pallet.unit
+    pallet_text = (f"{pallet.name or 'Custom'} {_fmt(pallet.length)} × {_fmt(pallet.width)} {unit}, "
+                   f"deck {_fmt(pallet.deck_height or 0)} {unit}, max weight "
+                   + (f"{_fmt(pallet.max_weight)} {weight_unit}" if pallet.max_weight is not None else "none"))
+    build = [f"max height {_fmt(pallet.height)} {unit}" if pallet.height is not None else "no height limit (one layer)"]
+    if pallet.max_volume is not None:
+        build.append(f"max volume {_fmt(pallet.max_volume)} {unit}³")
+    if pallet.max_plan_area is not None:
+        build.append(f"max plan area {_fmt(pallet.max_plan_area)} {unit}²")
+    case_text = (f"{_fmt(case_args['length'])} × {_fmt(case_args['width'])} × {_fmt(case_args['height'])} "
+                 f"{unit}, {_fmt(case_args['weight'])} {weight_unit}, "
+                 + ("this side up" if case_args["this_side_up"] else "may be tipped"))
+    solve_text = STACKING_LABELS[stacking].split(" (")[0].lower()
+    if stacking != "column":
+        solve_text += f" (min support {min_support:.0%})"
+    if ga is None:
+        solve_text += ", GA off"
+    else:
+        stop = f"stop after {ga[3]} without improvement, max {ga[0]}" if ga[3] else f"{ga[0]} generations"
+        solve_text += f", GA {stop}, population {ga[1]}, seed {ga[2]}"
+    parts = [f"<b>Pallet</b> {pallet_text}", f"<b>Build</b> {', '.join(build)}", f"<b>Case</b> {case_text}",
+             f"<b>Solve</b> {solve_text}"]
+    text = " · ".join(parts)
+    if stale:
+        text += " · <em>inputs have changed since this solve: press Solve on the Input tab</em>"
+    return text
+
+
+def render_input_summary(text: str) -> None:
+    st.markdown(f"<div class='input-summary'>{text}</div>", unsafe_allow_html=True)
+
+
+def render_metrics(pallet: Pallet, solved: Solved, case_args: dict, weight_unit: str) -> None:
+    """Every calculated result: the metric grid, what limits the count, and how the layers are built.
+
+    Shown both in the Input tab's Result section and at the top of the Summary tab.
+    """
     result, count = solved.result, solved.count
     unit = pallet.unit
     load_height = max((p.z + p.height for p in result.placements), default=0.0)
@@ -234,6 +278,11 @@ def render_summary(pallet: Pallet, solved: Solved, case_args: dict, weight_unit:
         st.caption(f"Stacking: {STACKING_LABELS[result.stacking].split(' (')[0].lower()} \u00b7 {layering}")
     if result.stacking_note:
         st.warning(result.stacking_note)
+
+
+def render_summary(pallet: Pallet, solved: Solved, case_args: dict, weight_unit: str) -> None:
+    render_metrics(pallet, solved, case_args, weight_unit)
+    result = solved.result
     notes = solver_notes(result, case_args)
     if notes:
         st.markdown("**Solver notes**")

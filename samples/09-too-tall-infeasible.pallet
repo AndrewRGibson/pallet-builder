@@ -64,6 +64,11 @@
   "expected": {
     "cases": 0,
     "layers": 0,
-    "cases_per_layer": 0
+    "cases_per_layer": 0,
+    "selected_solver": "Block packer",
+    "interlocked": false,
+    "limited_by": "infeasible",
+    "mixed_orientations": false,
+    "tipped": false
   }
 }

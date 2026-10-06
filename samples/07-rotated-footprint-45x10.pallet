@@ -2,7 +2,7 @@
   "format": "pallet-builder-input",
   "version": 1,
   "name": "Custom 40 x 48 in, 45 x 10 x 5 in case (fits only rotated)",
-  "description": "The case is longer than the deck one way, so it only fits turned 90 degrees: one layer of 4.",
+  "description": "The case is longer than the deck one way, so it only fits turned 90 degrees: one layer of 4 (no build height is set, so the load is a single layer).",
   "units": "US",
   "pallet": {
     "preset": "Custom",
@@ -64,6 +64,11 @@
   "expected": {
     "cases": 4,
     "layers": 1,
-    "cases_per_layer": 4
+    "cases_per_layer": 4,
+    "selected_solver": "Block packer",
+    "interlocked": false,
+    "limited_by": "space",
+    "mixed_orientations": false,
+    "tipped": false
   }
 }

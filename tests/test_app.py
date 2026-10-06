@@ -28,10 +28,6 @@ def metric(at: AppTest, label: str) -> str:
     return next(m.value for m in at.metric if m.label == label)
 
 
-def strip(at: AppTest) -> str:
-    return next(m.value for m in at.markdown if "class='result-strip'" in m.value)
-
-
 def button(at: AppTest, label: str):
     return next(b for b in at.button if b.label == label)
 
@@ -40,13 +36,22 @@ def sensitivity_table(at: AppTest):
     return next((d.value for d in at.dataframe if "Case size" in d.value.columns), None)
 
 
-def test_default_page_opens_on_overview_with_result_strip():
+def test_default_page_opens_on_overview():
     at = run()
     assert [t.label for t in at.tabs][:7] == ["Overview", "Input", "Summary", "3D view", "Placements",
                                               "By iteration", "Sensitivity"]
     assert at.session_state["main_tab"] == "Overview"
     assert metric(at, "Cases") == "96" and metric(at, "Layers") == "6 layers × 16"
-    assert "<b>96 cases</b>" in strip(at) and "limited by pallet space" in strip(at)
+
+
+def test_input_tab_result_shows_every_metric():
+    at = run()
+    labels = [m.label for m in at.metric]
+    every = ["Cases", "Layers", "Max by volume", "Cube use", "Deck coverage", "Load weight", "Build height",
+             "Headroom", "Interlock", "Min support"]
+    assert labels[:10] == every  # the Input tab's Result section (drawn before Summary) has the full grid
+    assert labels.count("Cases") == 2  # and Summary shows the same metrics
+    assert any("Limited by pallet space" in i.value for i in at.info)
 
 
 @pytest.mark.parametrize("name", list(SAMPLES))
@@ -91,9 +96,9 @@ def test_auto_solve_off_waits_for_the_solve_button():
     at = run()
     at.toggle(key="auto_solve").set_value(False).run()
     at.number_input(key="c_wid").set_value(10.5).run()
-    assert metric(at, "Cases") == "96" and "press Solve" in strip(at)
+    assert metric(at, "Cases") == "96" and any("press **Solve**" in w.value for w in at.warning)
     button(at, "Solve").click().run()
-    assert metric(at, "Cases") != "96" and "press Solve" not in strip(at)
+    assert metric(at, "Cases") != "96" and not any("press **Solve**" in w.value for w in at.warning)
 
 
 def test_sensitivity_only_computes_while_its_tab_is_open():
@@ -142,3 +147,23 @@ def test_overview_describes_every_tab():
     overview = next(m.value for m in at.markdown if "### The tabs" in m.value)
     missing = [tab for tab in tabs if f"| **{tab}** |" not in overview]
     assert not missing, f"Overview's tab table is missing: {missing}"
+
+
+def test_result_sits_at_the_bottom_of_the_input_tab():
+    at = run()
+    markdown = [m.value for m in at.markdown]
+    result_label = next(i for i, v in enumerate(markdown) if "section-label'>Result" in v)
+    last_input_section = max(i for i, v in enumerate(markdown) if "section-label'>Solve" in v)
+    assert result_label > last_input_section
+
+
+def test_result_tabs_start_with_what_was_solved():
+    at = run()
+    summary = next(m.value for m in at.markdown if "class='input-summary'" in m.value)
+    for part in ("<b>Pallet</b> CHEP 40 \u00d7 48 in", "<b>Build</b> max height 60 in",
+                 "<b>Case</b> 12 \u00d7 10 \u00d7 8 in, 20 lb", "<b>Solve</b> interlock when possible"):
+        assert part in summary
+    at.toggle(key="auto_solve").set_value(False).run()
+    at.number_input(key="c_len").set_value(11.0).run()
+    stale = next(m.value for m in at.markdown if "class='input-summary'" in m.value)
+    assert "12 \u00d7 10 \u00d7 8 in" in stale and "inputs have changed" in stale  # describes the solved inputs

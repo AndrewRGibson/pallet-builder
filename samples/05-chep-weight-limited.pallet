@@ -2,7 +2,7 @@
   "format": "pallet-builder-input",
   "version": 1,
   "name": "CHEP, heavy 12 x 10 x 8 in cases (weight-limited)",
-  "description": "40 lb cases: the 2,200 lb rating caps the load at 55 cases, well below the space available.",
+  "description": "40 lb cases: the 2,200 lb rating caps the load at 55 cases, well below the 96 the space would hold.",
   "units": "US",
   "pallet": {
     "preset": "CHEP",
@@ -64,6 +64,11 @@
   "expected": {
     "cases": 55,
     "layers": 4,
-    "cases_per_layer": 16
+    "cases_per_layer": 16,
+    "selected_solver": "Block packer",
+    "interlocked": false,
+    "limited_by": "weight",
+    "mixed_orientations": false,
+    "tipped": false
   }
 }

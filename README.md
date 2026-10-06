@@ -135,7 +135,8 @@ The page has the title and version at the top, then one row of tabs: **Overview,
 
 - **Solving:** with **Auto-solve** on (the default), the app re-solves whenever an input changes. Turn it off for heavy settings, such as large GA runs, and press **Solve** when ready. A note says when the inputs have changed since the last solve.
 - **Speed:** the heavier tabs (3D view, Placements, By iteration, Sensitivity) only compute while they're open, so an edit costs about 0.1 s on the Summary tab even with sensitivity on.
-- **Result strip:** a one-line result at the top of the Input tab (cases, layers × per layer, cube use, and what limits the count) shows the effect of each edit without switching tabs.
+- **Result:** the bottom of the Input tab shows every calculated metric (the same grid as Summary) and what limits the count, so you see the full effect of each edit without switching tabs.
+- **Input summary:** each result tab (Summary, 3D view, Placements, By iteration, Sensitivity) starts with a summary of the inputs it was solved from: pallet, build limits, case and solve settings. With Auto-solve off, it notes when the inputs have changed since.
 
 Every input that affects the solve is on the **Input** tab. It's laid out in three columns (Units and Pallet; Build and Case; Solve), with each label and value on one line:
 
@@ -169,7 +170,7 @@ Every input that affects the solve is on the **Input** tab. It's laid out in thr
   - a metric EUR pallet,
   - an infeasible build,
   - column stacking that reaches the bound.
-- **Samples as tests:** each sample records its `"expected"` result, and `tests/test_inputs.py` solves every one, so the samples double as regression tests. Add a scenario by dropping in another `.pallet` file with its expected result.
+- **Samples as tests:** each sample records its `"expected"` facts, i.e. the claims in its title and description: cases, layers, Ti, the winning solver, whether the layers interlock, what limits the count, mixed orientations and tipping. `tests/test_inputs.py` re-solves every sample and checks them all, so a description can't drift from what the solver does. `scripts/build_samples.py` defines the samples and rebuilds them (`uv run python scripts/build_samples.py`); add a scenario there.
 - **Code:** reading, writing and validation live in `pallet_builder.inputs`. `load`/`loads` validate and fill defaults, `dumps` writes a file, and `solver_arguments` turns a document into `Pallet`, `Case` and solve options.
 
 The other tabs:

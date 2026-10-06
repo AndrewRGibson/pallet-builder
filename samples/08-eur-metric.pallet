@@ -2,7 +2,7 @@
   "format": "pallet-builder-input",
   "version": 1,
   "name": "EUR 1200 x 800 mm, 30 x 20 x 15 cm cases (metric)",
-  "description": "A metric example: a EUR pallet built to 180 cm with 8 kg cases.",
+  "description": "A metric example: a EUR pallet built to 180 cm with 8 kg cases. Space limits the load to 11 layers of 16, and the layers interlock.",
   "units": "Metric",
   "pallet": {
     "preset": "EUR_1200X800",
@@ -64,6 +64,11 @@
   "expected": {
     "cases": 176,
     "layers": 11,
-    "cases_per_layer": 16
+    "cases_per_layer": 16,
+    "selected_solver": "Genetic algorithm",
+    "interlocked": true,
+    "limited_by": "space",
+    "mixed_orientations": true,
+    "tipped": false
   }
 }

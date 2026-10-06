@@ -78,9 +78,10 @@ CSS = """
     .section-label { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.06em;
                      text-transform: uppercase; opacity: 0.65; margin: 0.2rem 0 0.25rem; }
     [data-testid="stMetricValue"] { font-size: 1.35rem; }
-    /* Result strip at the top of the Input tab. */
-    .result-strip { padding: 0.45rem 0.8rem; border-radius: 0.5rem; background: rgba(59, 130, 246, 0.08);
-                    border: 1px solid rgba(59, 130, 246, 0.25); margin-bottom: 0.4rem; }
+    /* What a result tab was solved from, at the top of each result tab. */
+    .input-summary { padding: 0.4rem 0.8rem; border-radius: 0.5rem; font-size: 0.85rem;
+                     background: rgba(128, 128, 128, 0.08); border: 1px solid rgba(128, 128, 128, 0.25);
+                     margin-bottom: 0.6rem; }
 </style>
 """
 

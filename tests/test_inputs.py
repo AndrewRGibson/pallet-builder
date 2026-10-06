@@ -12,6 +12,7 @@ from pallet_builder.inputs import (
     sample_paths,
     solver_arguments,
 )
+from scripts.build_samples import facts
 
 SAMPLES = sample_paths(Path(__file__).resolve().parents[1] / "samples")
 
@@ -25,11 +26,12 @@ def test_samples_exist_with_our_extension():
 def test_every_sample_solves_to_its_expected_result(path):
     doc = loads(path.read_text(encoding="utf-8"))
     pallet_kwargs, case_kwargs, options = solver_arguments(doc)
-    count, result = maximize_case_count(Pallet(**pallet_kwargs), Case(**case_kwargs), **options)
+    pallet = Pallet(**pallet_kwargs)
+    count, result = maximize_case_count(pallet, Case(**case_kwargs), **options)
 
-    expected = doc["expected"]
-    assert (count, result.layers, result.cases_per_layer) == (
-        expected["cases"], expected["layers"], expected["cases_per_layer"])
+    # Every recorded fact behind the sample's description (count, layers, winning solver, interlock,
+    # what limits it, ...) must still hold; rebuild with scripts/build_samples.py if behavior changes.
+    assert facts(pallet, case_kwargs, count, result) == doc["expected"]
 
 
 def test_save_and_load_round_trip_keeps_every_value():

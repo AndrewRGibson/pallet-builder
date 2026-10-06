@@ -104,11 +104,14 @@ def render_file_bar() -> None:
     files.render()
 
 
-def render_result_strip(placeholder, text: str, *, stale: bool, error: str | None = None) -> None:
-    """The one-line result at the top of the Input tab, so edits show their effect without switching tabs."""
+def render_result(placeholder, render_metrics, *, stale: bool, error: str | None = None) -> None:
+    """The Result section at the bottom of the Input tab: every calculated metric, so an edit shows its full
+    effect without switching tabs. ``render_metrics()`` draws the metric grid (shared with Summary)."""
     with placeholder.container():
+        _section("Result")
         if error:
             st.error(f"Invalid input: {error}")
             return
-        note = " · <em>inputs changed: press Solve to update</em>" if stale else ""
-        st.markdown(f"<div class='result-strip'>{text}{note}</div>", unsafe_allow_html=True)
+        if stale:
+            st.warning("Inputs have changed since this solve: press **Solve** to update.", icon=":material/sync:")
+        render_metrics()

@@ -1,8 +1,8 @@
 {
   "format": "pallet-builder-input",
   "version": 1,
-  "name": "CHEP, 9 x 7 x 8 in cases (GA + interlock)",
-  "description": "The block packer finds 27 per layer; the GA finds 28 and a flipped pattern that interlocks the layers.",
+  "name": "CHEP, 9 x 7 x 8 in cases (GA beats block packer, interlocked)",
+  "description": "The block packer finds 27 per layer; the GA finds 28, in a pattern that interlocks when every other layer is turned 180 degrees.",
   "units": "US",
   "pallet": {
     "preset": "CHEP",
@@ -64,6 +64,11 @@
   "expected": {
     "cases": 168,
     "layers": 6,
-    "cases_per_layer": 28
+    "cases_per_layer": 28,
+    "selected_solver": "Genetic algorithm",
+    "interlocked": true,
+    "limited_by": "space",
+    "mixed_orientations": true,
+    "tipped": false
   }
 }

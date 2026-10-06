@@ -2,7 +2,7 @@
   "format": "pallet-builder-input",
   "version": 1,
   "name": "CHEP, 12 x 10 x 8 in cases",
-  "description": "The app's default: a CHEP pallet built to 60 in. Every layer is a full 16-case grid, so space limits the load.",
+  "description": "The app's default: a CHEP pallet built to 60 in. Every layer is a full 16-case grid (flipping it changes nothing, so the layers stack in columns), and space limits the load.",
   "units": "US",
   "pallet": {
     "preset": "CHEP",
@@ -64,6 +64,11 @@
   "expected": {
     "cases": 96,
     "layers": 6,
-    "cases_per_layer": 16
+    "cases_per_layer": 16,
+    "selected_solver": "Block packer",
+    "interlocked": false,
+    "limited_by": "space",
+    "mixed_orientations": false,
+    "tipped": false
   }
 }
