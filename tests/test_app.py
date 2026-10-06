@@ -134,3 +134,11 @@ def test_css_targets_streamlit_elements_that_still_exist():
     bundle = "".join(path.read_text(encoding="utf-8", errors="ignore") for path in static.rglob("*.js"))
     missing = [test_id for test_id in STREAMLIT_TEST_IDS if not re.search(re.escape(test_id), bundle)]
     assert not missing, f"Streamlit no longer renders: {missing}; update ui/style.py"
+
+
+def test_overview_describes_every_tab():
+    at = run()
+    tabs = [t.label for t in at.tabs][:7]  # the page's main tab row
+    overview = next(m.value for m in at.markdown if "### The tabs" in m.value)
+    missing = [tab for tab in tabs if f"| **{tab}** |" not in overview]
+    assert not missing, f"Overview's tab table is missing: {missing}"

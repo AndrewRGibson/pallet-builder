@@ -134,26 +134,25 @@ that lock together instead of standing in loose columns.
 
 ### How to use it
 
-Set everything on the **Input** tab. A one-line result at the top of that tab shows the effect of each edit;
-the full results are on the other tabs. With **Auto-solve** on, results update as you type; turn it off for heavy
-settings and press **Solve**. The bar at the top of the Input tab loads a built-in **sample**, resets to the
-defaults, opens your own **.pallet** file, or **saves** the current inputs as one.
+1. Set everything on the **Input** tab: units, pallet, build limits, case and solver settings. A one-line result
+   at the top of that tab shows the effect of each edit.
+2. Read the outcome on **Summary**, look at the stack in **3D view**, and get case-by-case positions from
+   **Placements**.
+3. Use **Sensitivity** to see whether a slightly different case size would fit more, and how tight your tolerances
+   need to be.
 
-1. **Units**: US (in, lb) or Metric (cm, kg) for every length and weight.
-2. **Pallet**: a standard preset (CHEP, GMA, EUR) or custom deck size, its deck height and rated max weight.
-3. **Build**: the max build height from the floor (including the pallet), plus optional volume and plan-area
-   limits. Leave a limit blank for no limit.
-4. **Case**: length, width, height, weight, and whether it must stay *this side up*.
-5. **Solve**: how layers stack (interlocked, column, or no columns), the minimum support for each case, and the
-   genetic algorithm (GA) settings.
+With **Auto-solve** on, results update as you type; turn it off for heavy settings (for example a long GA run)
+and press **Solve** when ready. The 3D view, Placements, By iteration and Sensitivity tabs only compute while
+they're open, so editing stays quick. Save your inputs as a **.pallet** file, or start from a built-in sample.
 
 ### How it solves
 
 - **One layer pattern**: a *block packer* fills the deck with grids of cases, cutting it into blocks where that
-  fits more. Where it falls short of the *malleable bound* (deck area \u00f7 case footprint), a *GA* searches for
-  denser or better-interlocking patterns. The best layer wins.
-- **Flat layers**: every case in a layer stands the same way up, so layers = (build height \u2212 deck) \u00f7 case
-  height, capped by the weight and other limits.
+  fits more. Where it falls short of the *bound* (deck area \u00f7 case footprint), a *genetic algorithm (GA)*
+  searches for denser or better-interlocking patterns, running either a fixed number of generations or until it
+  stops improving. The best layer wins.
+- **Flat layers**: every case in a layer stands the same way up, so layers = (build height \u2212 deck) \u00f7
+  case height, capped by the weight and other limits. *Ti* is the cases per layer and *Hi* the number of layers.
 - **Interlocking**: alternate layers can be mirrored or turned 180\u00b0 so cases bridge the seams below, as
   long as each case keeps its minimum support. This never costs a case unless you forbid column stacking.
 
@@ -161,11 +160,13 @@ defaults, opens your own **.pallet** file, or **saves** the current inputs as on
 
 | Tab | What it shows |
 |---|---|
-| **Summary** | Case count, Ti \u00d7 Hi, cube use, weight, height, interlock, what limits the count, and which solvers ran |
-| **3D view** | The built pallet: drag to spin, scroll to zoom, buttons for iso, front, side and top views |
-| **Placements** | Every case's layer, position and orientation (download as CSV from the table toolbar) |
-| **By iteration** | How the GA's objective and interlock improved, generation by generation |
-| **Sensitivity** | How the result changes if the case gets slightly bigger or smaller in any combination of dimensions |
+| **Overview** | This page: what the app is for, how to use it, and how it solves |
+| **Input** | The result strip; load a sample, open or save a .pallet file, or reset to defaults; then every input: units, pallet (preset or custom, deck height, max weight), build limits (max build height including the pallet, optional volume and plan area; blank = no limit), case (size, weight, this side up) and solve settings (Auto-solve, stacking, minimum support, GA stop rule, generations, population, seed) |
+| **Summary** | Cases, layers (Hi \u00d7 Ti), max by volume, cube use, deck coverage, load weight, build height, headroom, interlock and minimum support; what limits the count; how the layers stack; solver notes on any limits that applied; and the solver status table (each solver's result, work done and time) |
+| **3D view** | The built pallet: drag to spin, scroll to zoom, buttons for iso, front, side and top views. Brown is the pallet deck, layers alternate shades, red dashes mark the max build height |
+| **Placements** | Every case's number, layer, pattern (A, or B for flipped layers), position (x, y, z), size, and whether it's rotated or tipped. Download as CSV from the table toolbar |
+| **By iteration** | How the GA's best and average objective (and interlock) improved, generation by generation, against the bound and the block packer's result; or why the GA didn't run |
+| **Sensitivity** | Re-solves every combination of slightly bigger or smaller case lengths, widths and heights (each with its own step settings), then lists **opportunities** (changes that add cases, smallest first) and **risks** (smallest changes that lose cases), above a ranked table with the base case highlighted |
 
 One case type per pallet. Stability is judged by interlock and support; crush strength and center of gravity
 are not modeled yet.
