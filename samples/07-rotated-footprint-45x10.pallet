@@ -1,0 +1,69 @@
+{
+  "format": "pallet-builder-input",
+  "version": 1,
+  "name": "Custom 40 x 48 in, 45 x 10 x 5 in case (fits only rotated)",
+  "description": "The case is longer than the deck one way, so it only fits turned 90 degrees: one layer of 4.",
+  "units": "US",
+  "pallet": {
+    "preset": "Custom",
+    "length": 40.0,
+    "width": 48.0,
+    "deck_height": 6.0,
+    "max_weight": null
+  },
+  "build": {
+    "max_height": null,
+    "max_volume": null,
+    "max_plan_area": null
+  },
+  "case": {
+    "length": 45.0,
+    "width": 10.0,
+    "height": 5.0,
+    "weight": 10.0,
+    "this_side_up": true
+  },
+  "solve": {
+    "stacking": "interlock",
+    "min_support_pct": 70.0,
+    "ga": {
+      "enabled": true,
+      "stop_rule": "fixed",
+      "generations": 40,
+      "stall": 25,
+      "population": 24,
+      "seed": 0
+    }
+  },
+  "sensitivity": {
+    "enabled": true,
+    "dimensions": {
+      "length": {
+        "enabled": true,
+        "by": "fixed",
+        "fixed_step": 0.2,
+        "percent_step": 2.0,
+        "steps": 1
+      },
+      "width": {
+        "enabled": true,
+        "by": "fixed",
+        "fixed_step": 0.2,
+        "percent_step": 2.0,
+        "steps": 1
+      },
+      "height": {
+        "enabled": true,
+        "by": "fixed",
+        "fixed_step": 0.2,
+        "percent_step": 2.0,
+        "steps": 1
+      }
+    }
+  },
+  "expected": {
+    "cases": 4,
+    "layers": 1,
+    "cases_per_layer": 4
+  }
+}

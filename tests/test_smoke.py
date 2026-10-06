@@ -534,3 +534,26 @@ def test_sensitivity_insights_flag_weight_cap():
     taller_stack = Variant(12, 10, 7.6, cases=110, ti=16, hi=7)  # space for 112, weight caps at 110
     (gain,) = sensitivity_insights(base, [taller_stack], "in", max_weight=2200, case_weight=20)
     assert "Max weight caps it at 110; the space would take 112" in gain.text
+
+
+def test_ga_stops_after_stalling_and_reports_why():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    case = Case("S", 9, 7, 8)
+
+    _, fixed = maximize_case_count(chep, case, optimization_generations=40)
+    _, stalled = maximize_case_count(chep, case, optimization_generations=500, optimization_stall=15)
+    fixed_ga = next(r for r in fixed.solver_runs if r.solver == "Genetic algorithm")
+    stalled_ga = next(r for r in stalled.solver_runs if r.solver == "Genetic algorithm")
+
+    assert fixed_ga.iterations == 40 and "generation limit (40)" in fixed_ga.note
+    assert stalled_ga.iterations < 500 and "no improvement for 15 generations" in stalled_ga.note
+    best = [entry[1] for entry in stalled_ga.history]
+    last_gain = max(i for i in range(len(best)) if i == 0 or best[i] > best[i - 1])
+    assert len(best) - 1 - last_gain == 15  # stopped exactly 15 generations after the last improvement
+
+
+def test_ga_stall_must_not_be_negative():
+    import pytest
+
+    with pytest.raises(ValueError, match="optimization_stall"):
+        maximize_case_count(Pallet.from_standard("CHEP"), Case("S", 9, 7, 8), optimization_stall=-1)

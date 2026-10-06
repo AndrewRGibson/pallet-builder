@@ -347,13 +347,14 @@ def _block_layout(
     length: float,
     width: float,
     footprints: tuple[tuple[float, float], ...],
-) -> tuple[Spots, int, int, float]:
+) -> tuple[Spots, int, int, float, bool]:
     """Best guillotine layout of identical rectangles, as (x, y, footprint index) tuples.
 
     Each region is either filled with a uniform grid of one footprint or cut in two at a normal
     position and both halves solved recursively. This finds the classic block patterns (e.g. a
     5x8 case on a 40x48 deck: 48, where the greedy packer manages 45). Also returns the number of
-    region states solved, cuts tried, and the elapsed milliseconds.
+    region states solved, cuts tried, the elapsed milliseconds, and whether the search was simplified
+    to two-block patterns because the full search space was too large.
     """
     started = time.perf_counter()
     cuts_tried = 0
@@ -420,7 +421,7 @@ def _block_layout(
     build(0.0, 0.0, length, width, max_cuts)
     # Fill from the origin outward so a partial load (fewer cases than fit) stays compact.
     ordered = tuple(sorted(spots, key=lambda spot: (spot[1], spot[0])))
-    return ordered, len(memo), cuts_tried, (time.perf_counter() - started) * 1000
+    return ordered, len(memo), cuts_tried, (time.perf_counter() - started) * 1000, max_cuts != _UNLIMITED_CUTS
 
 
 # The GA's per-layer target is the malleable bound (deck area / case footprint); every case short of
@@ -432,8 +433,10 @@ _GA_INTERLOCK_WEIGHT = 0.999
 # Above this many cases per layer the bottom-left decoder gets slow in pure Python.
 _GA_MAX_TARGET = 150
 
-GASettings = tuple[int, int, int]  # (generations, population, seed)
-DEFAULT_GA: GASettings = (40, 24, 0)
+# (generations, population, seed, stall). With stall > 0 the GA stops once its best objective hasn't
+# improved for that many generations, and ``generations`` becomes the upper limit; 0 runs a fixed count.
+GASettings = tuple[int, int, int, int]
+DEFAULT_GA: GASettings = (40, 24, 0, 0)
 
 # Stacking modes: "column" repeats one pattern; "interlock" flips alternate layers when that adds
 # interlock; "no_column" requires interlock and otherwise limits the load to a single layer.
@@ -509,9 +512,10 @@ def _ga_layer(
     generations: int,
     population: int,
     seed: int,
+    stall: int = 0,
     stacking: str = "column",
     min_support: float = DEFAULT_MIN_SUPPORT,
-) -> tuple[Spots, tuple[tuple[int, float, float, float], ...], int, float]:
+) -> tuple[Spots, tuple[tuple[int, float, float, float], ...], int, float, str]:
     """Genetic search for a single-layer pattern of identical rectangles.
 
     A chromosome holds one gene per case up to the malleable target; each gene picks the case's
@@ -521,7 +525,9 @@ def _ga_layer(
     interlock of the pattern's best flip; with "no_column" a pattern that can't interlock is ranked
     below every one that can. Returns the best spots and the per-generation
     (generation, best objective, mean objective, best interlock) history, the number of distinct
-    patterns decoded, and the elapsed milliseconds.
+    patterns decoded, the elapsed milliseconds, and why it stopped: it reached the bound (with full
+    interlock when interlocking), its best objective stalled for ``stall`` generations (when
+    ``stall`` > 0), or it hit the ``generations`` limit.
     """
     started = time.perf_counter()
     target = int((length * width + 1e-9) // (footprints[0][0] * footprints[0][1]))
@@ -569,13 +575,22 @@ def _ga_layer(
         pop.append(tuple(rng.randrange(choices) for _ in range(target)))
 
     history: list[tuple[int, float, float, float]] = []
+    improved_at, best_so_far = 0, float("-inf")
+    stop_reason = f"generation limit ({generations})"
     for generation in range(generations + 1):
         scored = sorted(((evaluate(genes)[0], genes) for genes in pop), reverse=True)
         best_objective, best_genes = scored[0]
         _, best_spots, best_interlock = evaluate(best_genes)
         history.append((generation, best_objective, sum(score for score, _ in scored) / len(scored), best_interlock))
-        done = len(best_spots) >= target and (stacking == "column" or best_interlock >= 1 - 1e-9)
-        if done or generation == generations:
+        if best_objective > best_so_far + 1e-9:
+            improved_at, best_so_far = generation, best_objective
+        if len(best_spots) >= target and (stacking == "column" or best_interlock >= 1 - 1e-9):
+            stop_reason = "reached the bound"
+            break
+        if stall and generation - improved_at >= stall:
+            stop_reason = f"no improvement for {stall} generations"
+            break
+        if generation == generations:
             break
         children = [genes for _, genes in scored[:2]]  # elitism
         while len(children) < population:
@@ -592,7 +607,8 @@ def _ga_layer(
             children.append(tuple(child))
         pop = children
 
-    return evaluate(best_genes)[1], tuple(history), len(cache), (time.perf_counter() - started) * 1000
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    return evaluate(best_genes)[1], tuple(history), len(cache), elapsed_ms, stop_reason
 
 
 @dataclass(frozen=True)
@@ -690,9 +706,12 @@ def _plan_layers(pallet: Pallet, case: Case, opts: _Options = _DEFAULT_OPTIONS) 
         stack_args = (footprints, tuple(footprint_orientations), layer_height, layers, (length, width),
                       interlocking, opts)
 
-        block_spots, states, cuts_tried, block_ms = _block_layout(length, width, footprints)
-        block_run = SolverRun("Block packer", family, len(block_spots), target, layers,
-                              note="Recursive guillotine search over block patterns.",
+        block_spots, states, cuts_tried, block_ms, simplified = _block_layout(length, width, footprints)
+        block_note = "Recursive guillotine search over block patterns."
+        if simplified:
+            block_note += (" The full search was too large, so it was limited to two-block patterns; "
+                           "denser layouts may exist.")
+        block_run = SolverRun("Block packer", family, len(block_spots), target, layers, note=block_note,
                               iterations=states, evaluations=cuts_tried, elapsed_ms=block_ms)
         candidates = [(*_stack_plan(block_spots, block_run, *stack_args), block_run)]
         runs.append(block_run)
@@ -715,11 +734,12 @@ def _plan_layers(pallet: Pallet, case: Case, opts: _Options = _DEFAULT_OPTIONS) 
                 # second pass that penalizes non-interlocking patterns runs only if the first found none.
                 passes = ["interlock" if interlocking else "column"]
                 for stacking in passes:
-                    ga_spots, history, decoded, ga_ms = _ga_layer(
+                    ga_spots, history, decoded, ga_ms, stopped = _ga_layer(
                         length, width, footprints, *opts.ga, stacking, opts.min_support)
                     goal = {"column": "count", "interlock": "count, then interlock",
                             "no_column": "count with interlock required"}[stacking]
-                    note = f"Population {opts.ga[1]}, seed {opts.ga[2]}; objective: {goal}."
+                    note = (f"Population {opts.ga[1]}, seed {opts.ga[2]}; objective: {goal}; "
+                            f"stopped after {len(history) - 1} generations: {stopped}.")
                     name = "Genetic algorithm" if stacking != "no_column" else "Genetic algorithm (interlock required)"
                     ga_run = SolverRun(name, family, len(ga_spots), target, layers, note=note, history=history,
                                        iterations=len(history) - 1, evaluations=decoded, elapsed_ms=ga_ms)
@@ -778,6 +798,7 @@ def maximize_case_count(
     optimization_generations: int = DEFAULT_GA[0],
     optimization_population: int = DEFAULT_GA[1],
     optimization_seed: int = DEFAULT_GA[2],
+    optimization_stall: int = DEFAULT_GA[3],
     stacking: str = DEFAULT_STACKING,
     min_support: float = DEFAULT_MIN_SUPPORT,
 ) -> tuple[int, LayoutResult]:
@@ -804,6 +825,7 @@ def maximize_case_count(
         "optimization_generations": optimization_generations,
         "optimization_population": optimization_population,
         "optimization_seed": optimization_seed,
+        "optimization_stall": optimization_stall,
         "stacking": stacking,
         "min_support": min_support,
     }
@@ -833,6 +855,7 @@ def _options(
     optimization_generations: int,
     optimization_population: int,
     optimization_seed: int,
+    optimization_stall: int,
     stacking: str,
     min_support: float,
 ) -> _Options:
@@ -840,7 +863,9 @@ def _options(
         raise ValueError(f"Unknown stacking mode {stacking!r}. Use one of: {', '.join(STACKING_MODES)}.")
     if not 0.0 <= min_support <= 1.0:
         raise ValueError("min_support must be between 0 and 1.")
-    ga = (optimization_generations, optimization_population, optimization_seed) if optimize else None
+    if optimization_stall < 0:
+        raise ValueError("optimization_stall must be 0 (fixed generations) or a positive number of generations.")
+    ga = (optimization_generations, optimization_population, optimization_seed, optimization_stall) if optimize else None
     return _Options(ga, stacking, min_support)
 
 
@@ -924,6 +949,7 @@ def optimize_layout(
     generations: int = DEFAULT_GA[0],
     population_size: int = DEFAULT_GA[1],
     seed: int = DEFAULT_GA[2],
+    stall: int = DEFAULT_GA[3],
 ) -> LayoutResult:
     """Solve with the GA layer search enabled (kept for API compatibility)."""
     return solve_pallet_layout(
@@ -933,6 +959,7 @@ def optimize_layout(
         optimization_generations=generations,
         optimization_population=population_size,
         optimization_seed=seed,
+        optimization_stall=stall,
     )
 
 
@@ -945,6 +972,7 @@ def solve_pallet_layout(
     optimization_generations: int = DEFAULT_GA[0],
     optimization_population: int = DEFAULT_GA[1],
     optimization_seed: int = DEFAULT_GA[2],
+    optimization_stall: int = DEFAULT_GA[3],
     stacking: str = DEFAULT_STACKING,
     min_support: float = DEFAULT_MIN_SUPPORT,
 ) -> LayoutResult:
@@ -953,7 +981,9 @@ def solve_pallet_layout(
     Each layer pattern comes from the block packer and, with ``optimize``, the GA layer search
     (used wherever it can add cases or, when interlocking, stability). ``stacking`` is "column"
     (same pattern every layer), "interlock" (flip alternate layers when that bridges seams; the
-    default) or "no_column" (interlock required, otherwise one layer). ``min_support`` is the
+    default) or "no_column" (interlock required, otherwise one layer). ``optimization_stall`` > 0
+    stops the GA once its best objective hasn't improved for that many generations, with
+    ``optimization_generations`` as the upper limit (0 runs a fixed count). ``min_support`` is the
     smallest share of a case's base that must rest on cases below. Supports US and metric units and
     the standard CHEP/GMA/EUR pallet definitions.
     """
@@ -1005,7 +1035,7 @@ def solve_pallet_layout(
     if not expanded_cases:
         return LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases available to place."])
     opts = _options(optimize, optimization_generations, optimization_population, optimization_seed,
-                    stacking, min_support)
+                    optimization_stall, stacking, min_support)
     return _evaluate_load(pallet, expanded_cases, violations, opts)
 
 

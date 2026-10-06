@@ -1,6 +1,6 @@
 [project]
 name = "pallet-builder"
-version = "0.1.15"  # 0.1.<commit count>; the runtime version is read from git
+version = "0.1.16"  # 0.1.<commit count>; the runtime version is read from git
 description = "Single-case pallet loading optimizer with a Streamlit planner UI"
 readme = "README.md"
 license = { text = "MIT" }
@@ -10,7 +10,9 @@ authors = [
 requires-python = ">=3.13"
 dependencies = [
     "plotly>=7.1.0",
-    "streamlit>=1.65.0",
+    # Pinned to the minor version: ui/style.py styles Streamlit's internal element IDs, which can change
+    # between releases (tests/test_app.py checks they still exist before an upgrade).
+    "streamlit>=1.65.0,<1.66",
 ]
 
 [project.scripts]
@@ -25,3 +27,7 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.10",
 ]
+
+[tool.pytest.ini_options]
+# The Streamlit UI package (ui/) lives at the repo root next to app.py.
+pythonpath = ["."]

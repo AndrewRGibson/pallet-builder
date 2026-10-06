@@ -1,166 +1,22 @@
 # Pallet Builder
 
-This project is a practical starting point for a pallet-loading optimizer. For this phase, each run is intentionally scoped to stacking a single case type on a pallet: one SKU, one fixed case dimension set, repeated as many times as needed to fill the pallet.
+Pallet Builder works out how many identical cases fit on a pallet, and exactly how to stack them, within the pallet's weight rating and a maximum build height. Each run is intentionally scoped to a single case type: one SKU, one fixed case size, repeated as many times as fits.
 
 ## Quick start
 
 ```bash
-uv sync                          # install dependencies
-uv run streamlit run app.py      # open the planner UI (3D view, layer plan, export)
+uv sync                          # install dependencies (Python 3.13+)
+uv run streamlit run app.py      # open the planner UI at http://localhost:8501
 uv run pytest                    # run the test suite
 ```
 
-The solver packs each layer with exact block patterns and stacks flat layers up to the max build height, including the pallet deck. See [Current solver behavior](#current-solver-behavior) and [Streamlit UI](#streamlit-ui) for details.
+The solver packs each layer with block patterns (improved by a genetic algorithm where they fall short), stacks flat layers up to the max build height (which includes the pallet deck), and interlocks alternate layers where it can. See [Current solver behavior](#current-solver-behavior) and [Streamlit UI](#streamlit-ui) for details.
 
 **Versioning:** the version is `0.1.<commit count>`. `pallet_builder.__version__` and the app header read the count from git, so they stay current automatically. The static `version` in `pyproject.toml` (used for packaging) must be bumped to the new count in every commit.
 
-## Problem framing
+## Background
 
-A pallet build is effectively a constrained packing problem. In its simplest form it is a 2D rectangular packing problem on the pallet footprint, with a 3D extension once stacking height, stability, and load limits are included. Because this version is intentionally single-case, the optimization problem is narrowed to arranging repeated copies of the same case type efficiently while respecting physical, operational, and safety constraints.
-
-The optimization problem still involves:
-
-- maximizing pallet utilization
-- minimizing wasted area and empty gaps
-- reducing overhang and underhang
-- keeping the load within height, width, and length tolerances
-- respecting weight limits and center-of-gravity limits
-- avoiding unstable stacks and unsafe overhangs
-- preserving handling constraints such as forklift access and stretch-wrap requirements
-- optionally favoring brick-wall patterns or avoiding stacked columns when the product is fragile
-
-The ideal objective is not a single scalar value. In practice the optimizer should minimize a weighted penalty function such as:
-
-- footprint utilization loss
-- overhang penalty
-- void-space penalty
-- stack instability penalty
-- center-of-gravity deviation penalty
-- handling and operational constraints penalty
-
-The user can then tune the trade-off between density and safety.
-
-## Operations Research methods
-
-### 1. Integer programming (IP)
-
-For a fixed set of case dimensions and a fixed pallet footprint, MIP is often the most defendable formulation when the problem is discretized well enough. The usual approach is to identify candidate placements in a grid or on candidate rectangles, then introduce binary decision variables for whether a case is placed in a given position and orientation.
-
-Typical constraints include:
-
-- non-overlap across rectangles in the same layer
-- footprint containment within pallet dimensions
-- orientation restrictions (e.g., only 90-degree rotations)
-- no placement across pallet edges unless overhang is explicitly allowed
-- layer-by-layer volume and height constraints
-- stacking compatibility constraints for cases that may be stacked safely
-
-Advantages:
-
-- exact optimality on a finite discretization
-- explicit modeling of hard constraints
-- good auditability and explainability for business users
-
-Drawbacks:
-
-- scales poorly with large numbers of cases or many possible placements
-- very sensitive to the number of candidate positions
-- difficult to model full 3D stability and dynamic load propagation
-
-### 2. CP-SAT / constraint programming
-
-Constraint programming is often a better fit when the constraints are highly logical and combinatorial, such as:
-
-- a case must not overlap any placed case
-- a stack must use a legal pattern
-- case orientations are restricted
-- some cases must remain on the ground while others may stack
-- identical cases may be grouped into columns
-
-CP-SAT is also useful for a layered decomposition: assign cases to layers first, then solve the 2D packing problem within each layer. This hybrid approach is often more tractable than a full 3D MIP.
-
-### 3. Genetic algorithms and metaheuristics
-
-For a single-case pallet run, a GA is still useful as a search layer. A GA is especially helpful when:
-
-- the pallet footprint is constrained and close to full
-- objective trade-offs are noisy or difficult to linearize
-- the solution space contains many near-feasible layouts
-- there is a need to quickly generate strong candidate layouts for interactive use
-
-A GA can evolve:
-
-- ordering of placement for repeated cases
-- orientation choices for the case type
-- anchor-point and shelf-positioning heuristics
-- layer or column grouping decisions when needed
-- stacking support decisions for legal load patterns
-
-The evaluation function usually approximates the real objective with penalty terms for overlap, overhang, voids, and stability violations.
-
-Advantages:
-
-- flexible and easy to extend
-- handles non-linear objectives naturally
-- good at producing strong practical layouts quickly
-
-Drawbacks:
-
-- no guarantee of global optimality
-- difficult to certify feasibility to customers
-- sensitive to representation and mutation operators
-
-### 4. Column generation, branch-and-bound, and layered decomposition
-
-Many industrial palletizers rely on decomposition:
-
-- Step 1: choose a set of candidate layers or columns
-- Step 2: pack each layer as a 2D container problem
-- Step 3: combine layers while respecting height and weight limits
-
-This is a strong strategy when the pallet height is limited and there are repeated case types. It can combine the tractability of specialized packers with exact optimization for the upper layer assignment.
-
-### 5. Beam search and greedy constructive heuristics
-
-This is often the most operationally useful method in real-time systems. A constructive heuristic keeps adding case placements while evaluating candidate expansions by objective and constraint slack. This approach is particularly useful when a fast estimate is needed before a harder optimization pass is run.
-
-## Constraints and restrictions to consider
-
-Before building the application, the following should be specified carefully:
-
-- pallet dimensions: length, width, height, deck board style, edge clearance
-- case dimensions: length, width, height, tolerance, variation between units
-- case weights and center-of-mass data
-- maximum pallet load and axle/vehicle stacking limits
-- allowable overhang and underhang values
-- whether edge overhang is allowed at all
-- whether some cases can be stacked directly on top of others
-- whether a brick-wall pattern is required for stability
-- whether columns are legal for specific SKUs or stack configurations
-- whether layers are fixed or variable
-- if the load must be “fully supported” by the pallet deck or if partial support is acceptable
-- if the distribution of mass must be balanced across the pallet footprint
-- if forklift or clamp handling restrictions change the layout rules
-- whether the case pattern must be symmetric or visually legible for loading staff
-
-## Operational goals
-
-The real objective function should account for multiple goals:
-
-1. maximize pallet volume utilization
-2. minimize voids on each layer
-3. minimize plan-view overhang and edge protrusion
-4. minimize underhang or lost deck area
-5. respect max height and load distribution
-6. avoid unstable or unrealistic stack patterns
-7. prefer consistent, repeatable loads for warehouse operations
-8. keep algorithm runtime within decision-support needs
-
-A common objective is a weighted sum such as:
-
-Objective = w1 * wasted_area + w2 * overhang + w3 * underhang + w4 * instability + w5 * weight_balance + w6 * height_penalty
-
-The weights depend on business priority. For example, a fragile, retail-facing load may heavily penalize instability, whereas a bulk logistics load may prioritize volume and throughput.
+The operations-research background (problem framing, integer programming, CP-SAT, genetic algorithms, decomposition, and the constraints and goals a full solution should consider) is in [docs/background.md](docs/background.md).
 
 ## Recommended approach for this project
 
@@ -184,22 +40,23 @@ Still open: load stability checks beyond support (center of gravity, crush limit
 
 ### Layer pattern
 
-Two solvers can build a layer, and the solver keeps whichever layer holds more cases.
+Two solvers can build a layer. The solver keeps whichever layer holds more cases, and on a tie, whichever interlocks better (see [Stacking](#stacking-column-or-interlocked)).
 
-**Block packer.** A recursive guillotine search over the deck: each region is either filled with a uniform grid of one case orientation or cut in two, and each half is solved the same way. It finds the classic block patterns. For example, 5×8 cases on a 40×48 deck give the full 48, where the original greedy packer managed 45. When the search space is very large (tiny cases on a big deck), it is limited to two-block patterns so it stays responsive.
+**Block packer.** A recursive guillotine search over the deck: each region is either filled with a uniform grid of one case orientation or cut in two, and each half is solved the same way. It finds the classic block patterns. For example, 5×8 cases on a 40×48 deck give the full 48, where a simple greedy packer manages 45. When the search space is very large (tiny cases on a big deck), it is limited to two-block patterns so it stays responsive.
 
 **GA layer search** (genetic algorithm). It starts from the **malleable bound**: how many cases would fit if they could be squeezed into any shape. For a whole pallet that's the space above the deck divided by the case volume. Because layers are flat and identical, this works out to `floor(deck area / case footprint)` per layer, which is the GA's target.
 - **Encoding:** a chromosome has one gene per case up to the target, and each gene picks that case's orientation.
 - **Decoding:** cases are placed in order at the bottom-left-most free spot, which can produce interlocking (non-guillotine) patterns that the block packer can't.
 - **Objective:** `placed − penalty × unplaced`, so the bound itself is the optimum.
 - **Search:** two-point crossover, point and block mutation, tournament selection and elitism. It stops early at the bound.
-- **When it runs:** only when the block packer falls short of the bound, the footprint isn't square, and the target is at most 150 cases per layer.
+- **When it runs:** when the block packer falls short of the bound, or when layers stack and the block pattern doesn't fully interlock (the GA may find an equally dense pattern that interlocks better). It's skipped when the footprint is square (only one orientation) or the target is over 150 cases per layer.
 - **Example:** for 9×7 cases on CHEP it finds 28 per layer, where the block packer finds 27 (the bound is 30). Defaults are 40 generations, population 24, seed 0, so results are reproducible.
+- **Stopping:** the GA always stops on reaching the bound. Otherwise it runs either a fixed number of generations (the default) or, with `optimization_stall=N` ("No improvement" in the app), until its best objective hasn't improved for N generations, with `optimization_generations` as the upper limit (up to 2,000 in the app). Each run's note gives the stopping reason: reached the bound, no improvement, or the generation limit.
 
 ### Layers and build height
 
 - `Pallet.height` is the **max build height measured from the floor, including the pallet**. The space for cases is `height − deck_height`. For example, a 60" build on a 6" CHEP deck leaves 54".
-- **Every layer has a flat top.** All cases in a layer share the same upright dimension, so the number of layers is `floor((max build height − deck height) / layer height)`. Every full layer uses the same pattern. A partial top layer, which happens when the weight limit or quantity runs out first, fills from case 1 outward.
+- **Every layer has a flat top.** All cases in a layer share the same upright dimension, so the number of layers is `floor((max build height − deck height) / layer height)`. Layers use one pattern (A), with every other layer flipped (B) when stacking interlocks. A partial top layer, which happens when the weight limit or quantity runs out first, fills in pattern order.
 - Cases marked *this side up* (the default) only rotate flat on the deck. With `this_side_up=False`, the solver tries each dimension as the upright one and keeps the option that stacks the most cases in total. Ties go to more cases per layer, for a wider base.
 - With `height=None`, there is no build limit and the solver builds a single layer.
 
@@ -235,9 +92,11 @@ Every result records what each solver did in `LayoutResult.solver_runs`, a list 
 
 - `Case`: dimensions, weight, quantity, unit, and `this_side_up`.
 - `Pallet`: deck length and width, `height` (max build height including the deck), `deck_height`, unit, and optional `max_weight`, `max_volume` and `max_plan_area`. `Pallet.from_standard(name, unit=..., max_build_height=...)` loads the CHEP, GMA, EUR_1200X800 and EUR_1000X1200 presets, and "EURO" is an alias for EUR_1200X800. Preset max weights are in lb for CHEP/GMA and kg for EUR. `Pallet` doesn't store a weight unit, so case weights must use the same unit.
-- `solve_pallet_layout(pallet, cases, optimize=True, optimization_generations=40, optimization_population=24, optimization_seed=0, stacking="interlock", min_support=0.7)`: places the given cases and returns a `LayoutResult`. Pass `optimize=False` to use the block packer only.
+- `solve_pallet_layout(pallet, cases, optimize=True, optimization_generations=40, optimization_population=24, optimization_seed=0, optimization_stall=0, stacking="interlock", min_support=0.7)`: places the given cases and returns a `LayoutResult`. Pass `optimize=False` to use the block packer only. `optimization_stall=N` stops the GA after N generations without improvement (0 = run a fixed number of generations).
 - `maximize_case_count(pallet, case, optimize=True, ..., stacking="interlock", min_support=0.7)`: returns the largest count that fits, with its `LayoutResult`. It takes the same options.
-- `optimize_layout(pallet, cases, generations=..., population_size=..., seed=...)`: shorthand for `solve_pallet_layout` with the GA on.
+- `optimize_layout(pallet, cases, generations=..., population_size=..., seed=..., stall=...)`: shorthand for `solve_pallet_layout` with the GA on.
+- `pallet_builder.inputs`: read, write and validate `.pallet` input files (see [Input files](#streamlit-ui)).
+- `pallet_builder.insights.sensitivity_insights`: opportunities and risks from a set of solved case sizes.
 - `LayoutResult` contains:
   - `placements`: x, y, z, size and orientation for each case, with z measured from the top of the deck.
   - `feasible` and `violations`.
@@ -272,7 +131,13 @@ Run it with:
 uv run streamlit run app.py
 ```
 
-The app finds the most cases that fit and re-solves whenever an input changes. Every input that affects the solve is in the sidebar, with each label and value on one line:
+The page has the title and version at the top, then one row of tabs: **Overview, Input, Summary, 3D view, Placements, By iteration, Sensitivity**. It opens on Summary. The app finds the most cases that fit.
+
+- **Solving:** with **Auto-solve** on (the default), the app re-solves whenever an input changes. Turn it off for heavy settings, such as large GA runs, and press **Solve** when ready. A note says when the inputs have changed since the last solve.
+- **Speed:** the heavier tabs (3D view, Placements, By iteration, Sensitivity) only compute while they're open, so an edit costs about 0.1 s on the Summary tab even with sensitivity on.
+- **Result strip:** a one-line result at the top of the Input tab (cases, layers × per layer, cube use, and what limits the count) shows the effect of each edit without switching tabs.
+
+Every input that affects the solve is on the **Input** tab. It's laid out in three columns (Units and Pallet; Build and Case; Solve), with each label and value on one line:
 
 - **Units**: one system for every length and weight, either US (in, lb) or Metric (cm, kg). Switching converts every value already entered.
 - **Pallet**:
@@ -284,16 +149,42 @@ The app finds the most cases that fit and re-solves whenever an input changes. E
 - **Case**: length, width, height and weight, plus *This side up*.
 - **Solve**:
   - Stacking: interlock when possible, column, or no column stacking; plus the minimum support.
-  - The GA layer search switch, with its generations, population and seed.
+  - The GA layer search switch, with its stop rule (fixed generations, or stop after no improvement for N generations with a max), generations, population and seed.
   - Settings that don't apply are greyed out rather than hidden, so their values are kept.
 
-Below the headline (the case count and layer breakdown, e.g. "96 cases fit · 6 layers × 16"), the results fill the page width as one set of tabs:
+**Input files.** The bar at the top of the Input tab loads a sample, resets to the defaults, opens a saved file, or saves the current inputs. If the Name is blank, the file is named from the inputs (e.g. "CHEP 12x10x8 in"). The same file can be opened again after edits.
 
-- **Overview**: what the app is for, how to use the sidebar, how the solver works, and what each tab shows.
+- **Format:** a `.pallet` file is JSON. `"format": "pallet-builder-input"` and a `"version"` number mark it as a Pallet Builder file, so other JSON files are rejected clearly. Lengths and weights are in the file's own `"units"` ("US" in/lb, or "Metric" cm/kg).
+- **Contents:** it records everything on the Input tab (units, pallet, build limits, case, stacking, GA and sensitivity settings), plus a name and description. A blank limit is saved as `null`, which means no limit; `0` stays a real limit.
+- **Partial files:** any section or field left out falls back to the defaults, so a hand-written file only needs the values that differ.
+- **Errors:** an invalid file is rejected with the first problem it finds, e.g. "case.length must be at least 0.001".
+- **Samples:** the `samples/` folder holds the worked examples, always listed in the app. They cover:
+  - the CHEP default,
+  - a full grid,
+  - a GA-plus-interlock case,
+  - the no-column fallback,
+  - a weight-limited load,
+  - a tipped tall case,
+  - a footprint that only fits rotated,
+  - a metric EUR pallet,
+  - an infeasible build,
+  - column stacking that reaches the bound.
+- **Samples as tests:** each sample records its `"expected"` result, and `tests/test_inputs.py` solves every one, so the samples double as regression tests. Add a scenario by dropping in another `.pallet` file with its expected result.
+- **Code:** reading, writing and validation live in `pallet_builder.inputs`. `load`/`loads` validate and fill defaults, `dumps` writes a file, and `solver_arguments` turns a document into `Pallet`, `Case` and solve options.
+
+The other tabs:
+
+- **Overview**: what the app is for, how to use the Input tab, how the solver works, and what each tab shows.
 - **Summary**:
-  - **Metrics:** cases, layers (Hi × Ti), malleable bound, cube use, deck coverage, load weight, build height (deck + load), headroom, interlock and minimum support.
+  - **Metrics:** cases, layers (e.g. "6 layers × 16"), max by volume (the cases that would fit if they filled the space perfectly), cube use, deck coverage, load weight, build height (deck + load), headroom, interlock and minimum support. Interlock reads "none found" when it was tried but no flip keeps every case supported, and "n/a" when it doesn't apply.
+  - **Solver notes:** the solver limits that applied to this result:
+    - the GA skipped because a layer would hold over 150 cases,
+    - the block packer limited to two-block patterns on a large deck,
+    - the GA stopping at its generation limit below the bound,
+    - tipping using one upright side for the whole load,
+    - each layer using a single pattern.
   - **Limit:** what stops the count going higher (pallet space, max weight, max volume or max plan area), or why a run is infeasible. A caption names the stacking and flip, e.g. "even layers rotated 180°".
-  - **Solver status:** a table of every solver run, with the total solve time. It lists layer family, cases per layer, the bound, interlock, iterations, evaluations, time, whether the run was used, and notes such as why the GA was skipped. Solver and Layers stay pinned when scrolling.
+  - **Solver status:** a table of every solver run, with the solve time (or "cached" when the result was reused). It lists layer family, cases per layer, the bound, interlock, iterations, evaluations, time, whether the run was used, and notes such as why the GA was skipped. Solver and Layers stay pinned when scrolling.
 - **3D view**: an interactive Plotly model of the built pallet.
   - Drag to spin (turntable rotation, so the pallet stays upright), scroll to zoom, and use the Iso, Front, Side and Top buttons to reset the viewpoint.
   - The deck is brown, layers alternate shades, and red dashes mark the max build height.
@@ -312,6 +203,22 @@ Below the headline (the case count and layer breakdown, e.g. "96 cases fit · 6 
 
 **Export:** every table can be downloaded as CSV from its own toolbar (hover over the table).
 
+### Code layout and tests
+
+- `src/pallet_builder/`: the solver (`solver.py`), input files (`inputs.py`) and sensitivity insights (`insights.py`). No Streamlit dependency.
+- `app.py`: assembles the page.
+- `ui/` (beside `app.py`): the Streamlit UI, one module per area:
+  - `state.py`: session state, units and `.pallet` mapping,
+  - `files.py`: the file bar,
+  - `inputs_tab.py`,
+  - `solving.py`: cached solve and explanations,
+  - `results.py`: Overview, Summary, Placements and By iteration,
+  - `view3d.py`,
+  - `sensitivity.py`,
+  - `style.py`: CSS.
+- `tests/`: `test_smoke.py` covers the solver, `test_inputs.py` covers file handling and every sample, and `test_app.py` runs the app headlessly (Streamlit's `AppTest`). The app tests cover every sample loading in the app, the save/load round trip, unit switching, settings that must keep their values, Auto-solve, lazy tabs, Reset and error handling.
+- **Streamlit version:** the compact Input layout styles some of Streamlit's internal element IDs, so `pyproject.toml` pins Streamlit to 1.65.x. A test checks the IDs still exist before you raise the pin.
+
 ## Recommendations for future versions
 
 - **More interlock options**: patterns that alternate between two different layouts (not just flips), and user-set interlock targets.
@@ -319,8 +226,8 @@ Below the headline (the case count and layer breakdown, e.g. "96 cases fit · 6 
 - **Stability checks**: center-of-gravity and load-distribution checks, and a per-case crush or max-stack-weight limit.
 - **Weighted objective**: tunable coefficients to trade density against stability, beyond the current count-first ranking.
 - **Mixed loads**: support for more than one case type per pallet.
-- **Export**: printable loading instructions (a layer sheet) alongside the JSON.
+- **Export**: printable loading instructions (a layer sheet per pattern) alongside the CSV tables and `.pallet` input files.
 
 ## Summary
 
-This is a real-world rectangular packing problem with strong operational constraints. The project deliberately handles one case type per pallet run, which keeps the model easy to reason about, validate and present. Within that scope, it packs each layer with block patterns, improves on them with a GA that targets the malleable bound, stacks flat layers to the max build height (interlocked by flipping alternate layers where that helps), respects weight, volume and area limits, explains what limits each result and which solver produced it, shows the built pallet in an interactive 3D view, and runs a case-size sensitivity analysis.
+This is a real-world rectangular packing problem with strong operational constraints. The project deliberately handles one case type per pallet run, which keeps the model easy to reason about, validate and present. Within that scope, it packs each layer with block patterns, improves on them with a GA that targets the malleable bound, stacks flat layers to the max build height (interlocked by flipping alternate layers where that helps), respects weight, volume and area limits, explains what limits each result and which solver produced it, shows the built pallet in an interactive 3D view, runs a case-size sensitivity analysis with plain-language opportunities, and saves and loads complete input sets as `.pallet` files.

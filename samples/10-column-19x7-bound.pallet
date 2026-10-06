@@ -1,0 +1,69 @@
+{
+  "format": "pallet-builder-input",
+  "version": 1,
+  "name": "CHEP, 19 x 7 x 8 in cases (column stacking, GA reaches the bound)",
+  "description": "With column stacking the GA's objective is the case count alone; it reaches the malleable bound of 14 per layer.",
+  "units": "US",
+  "pallet": {
+    "preset": "CHEP",
+    "length": 40.0,
+    "width": 48.0,
+    "deck_height": 6.0,
+    "max_weight": 2200.0
+  },
+  "build": {
+    "max_height": 60.0,
+    "max_volume": null,
+    "max_plan_area": null
+  },
+  "case": {
+    "length": 19.0,
+    "width": 7.0,
+    "height": 8.0,
+    "weight": 5.0,
+    "this_side_up": true
+  },
+  "solve": {
+    "stacking": "column",
+    "min_support_pct": 70.0,
+    "ga": {
+      "enabled": true,
+      "stop_rule": "fixed",
+      "generations": 40,
+      "stall": 25,
+      "population": 24,
+      "seed": 0
+    }
+  },
+  "sensitivity": {
+    "enabled": true,
+    "dimensions": {
+      "length": {
+        "enabled": true,
+        "by": "fixed",
+        "fixed_step": 0.2,
+        "percent_step": 2.0,
+        "steps": 1
+      },
+      "width": {
+        "enabled": true,
+        "by": "fixed",
+        "fixed_step": 0.2,
+        "percent_step": 2.0,
+        "steps": 1
+      },
+      "height": {
+        "enabled": true,
+        "by": "fixed",
+        "fixed_step": 0.2,
+        "percent_step": 2.0,
+        "steps": 1
+      }
+    }
+  },
+  "expected": {
+    "cases": 84,
+    "layers": 6,
+    "cases_per_layer": 14
+  }
+}

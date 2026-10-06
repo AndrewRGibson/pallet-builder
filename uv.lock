@@ -474,7 +474,7 @@ wheels = [
 
 [[package]]
 name = "pallet-builder"
-version = "0.1.15"
+version = "0.1.16"
 source = { editable = "." }
 dependencies = [
     { name = "plotly" },
@@ -490,7 +490,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "plotly", specifier = ">=7.1.0" },
-    { name = "streamlit", specifier = ">=1.65.0" },
+    { name = "streamlit", specifier = ">=1.65.0,<1.66" },
 ]
 
 [package.metadata.requires-dev]
