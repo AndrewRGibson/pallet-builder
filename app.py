@@ -18,13 +18,14 @@ from pallet_builder import (
 )
 
 APP_VERSION = __version__
-LENGTH_UNITS = ["in", "mm", "cm", "m", "ft"]
+# One unit system applies to every length and weight in the app.
+UNIT_SYSTEMS = {"US (in, lb)": ("in", "lb"), "Metric (cm, kg)": ("cm", "kg")}
 WEIGHT_UNITS = {"lb": 0.45359237, "kg": 1.0}  # kilograms per unit
 # Typical max build heights (floor to top of load, including the pallet) applied with a preset.
-DEFAULT_BUILD_HEIGHT = {"in": 60.0, "mm": 1800.0}
+DEFAULT_BUILD_HEIGHT = {"in": 60.0, "cm": 180.0}
+_LENGTH_KEYS = ("p_len", "p_wid", "p_deck", "p_height", "c_len", "c_wid", "c_hgt")
+_WEIGHT_KEYS = ("p_maxw", "c_weight")
 CUSTOM = "Custom"
-MODE_MAX = "Max cases"
-MODE_FIXED = "Fixed quantity"
 # Above this many cases the 3D view draws each layer as one block to stay responsive.
 MAX_3D_CASES = 6000
 
@@ -36,6 +37,23 @@ st.markdown(
         section[data-testid="stSidebar"] .block-container { padding-top: 0.6rem; }
         section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.35rem; }
         section[data-testid="stSidebar"] hr { margin: 0.4rem 0; }
+        section[data-testid="stSidebar"] { min-width: 330px; }
+        /* Sidebar properties: label and value on one line. */
+        section[data-testid="stSidebar"] [data-testid="stNumberInput"],
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] {
+            display: flex; flex-direction: row; align-items: center; gap: 0.5rem;
+        }
+        section[data-testid="stSidebar"] [data-testid="stNumberInput"] > [data-testid="stWidgetLabel"],
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] > [data-testid="stWidgetLabel"] {
+            flex: 0 0 52%; min-height: 0; margin: 0; padding: 0;
+        }
+        section[data-testid="stSidebar"] [data-testid="stNumberInput"] > div,
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] > div {
+            flex: 1 1 0; min-width: 0;
+        }
+        /* The +/- steppers crowd a half-width field; arrow keys still step the value. */
+        section[data-testid="stSidebar"] [data-testid="stNumberInputStepUp"],
+        section[data-testid="stSidebar"] [data-testid="stNumberInputStepDown"] { display: none; }
         .section-label { font-size: 0.75rem; font-weight: 700; letter-spacing: 0.06em;
                          text-transform: uppercase; opacity: 0.65; margin: 0.2rem 0 0.25rem; }
         [data-testid="stMetricValue"] { font-size: 1.35rem; }
@@ -48,30 +66,30 @@ st.markdown(
 # --- Session state and unit-aware callbacks -------------------------------------------------
 
 def _round(value: float) -> float:
-    return round(value, 4)
+    return round(value, 6)
+
+
+def _units() -> tuple[str, str]:
+    """The active (length unit, weight unit)."""
+    return UNIT_SYSTEMS.get(st.session_state.get("units"), ("in", "lb"))
 
 
 def _apply_preset() -> None:
     name = st.session_state.preset
-    if name == CUSTOM:
+    spec = STANDARD_PALLETS.get(name)
+    if name == CUSTOM or spec is None:
         return
-    spec = STANDARD_PALLETS[name]
-    unit = spec["unit"]
-    # The preset sets the weight unit; keep the case weight's physical value when it changes.
-    old_weight_unit = st.session_state.get("w_unit", spec["weight_unit"])
-    if "c_weight" in st.session_state and old_weight_unit != spec["weight_unit"]:
-        factor = WEIGHT_UNITS[old_weight_unit] / WEIGHT_UNITS[spec["weight_unit"]]
-        st.session_state.c_weight = _round(st.session_state.c_weight * factor)
+    length_unit, weight_unit = _units()
+
+    def length(key: str) -> float:
+        return _round(convert_length(float(spec[key]), spec["unit"], length_unit))
+
     st.session_state.update(
-        p_unit=unit,
-        _p_unit_prev=unit,
-        p_len=float(spec["length"]),
-        p_wid=float(spec["width"]),
-        p_deck=float(spec["deck_height"]),
-        p_height=DEFAULT_BUILD_HEIGHT[unit],
-        w_unit=spec["weight_unit"],
-        _w_unit_prev=spec["weight_unit"],
-        p_maxw=float(spec["max_weight"]),
+        p_len=length("length"),
+        p_wid=length("width"),
+        p_deck=length("deck_height"),
+        p_height=DEFAULT_BUILD_HEIGHT[length_unit],
+        p_maxw=_round(float(spec["max_weight"]) * WEIGHT_UNITS[spec["weight_unit"]] / WEIGHT_UNITS[weight_unit]),
     )
 
 
@@ -79,47 +97,44 @@ def _mark_custom() -> None:
     st.session_state.preset = CUSTOM
 
 
-def _convert_pallet_unit() -> None:
-    old, new = st.session_state._p_unit_prev, st.session_state.p_unit
-    for key in ("p_len", "p_wid", "p_deck", "p_height"):
-        st.session_state[key] = _round(convert_length(st.session_state[key], old, new))
-    factor = convert_length(1.0, old, new)
+def _convert_units() -> None:
+    """Re-express every entered length and weight in the newly selected unit system."""
+    old_length, old_weight = UNIT_SYSTEMS[st.session_state._units_prev]
+    new_length, new_weight = _units()
+    for key in _LENGTH_KEYS:
+        st.session_state[key] = _round(convert_length(st.session_state[key], old_length, new_length))
+    factor = convert_length(1.0, old_length, new_length)
     st.session_state.p_maxvol = _round(st.session_state.p_maxvol * factor**3)
     st.session_state.p_maxarea = _round(st.session_state.p_maxarea * factor**2)
-    st.session_state._p_unit_prev = new
-
-
-def _convert_case_unit() -> None:
-    old, new = st.session_state._c_unit_prev, st.session_state.c_unit
-    for key in ("c_len", "c_wid", "c_hgt"):
-        st.session_state[key] = _round(convert_length(st.session_state[key], old, new))
-    st.session_state._c_unit_prev = new
-
-
-def _convert_weight_unit() -> None:
-    old, new = st.session_state._w_unit_prev, st.session_state.w_unit
-    factor = WEIGHT_UNITS[old] / WEIGHT_UNITS[new]
-    for key in ("p_maxw", "c_weight"):
-        st.session_state[key] = _round(st.session_state[key] * factor)
-    st.session_state._w_unit_prev = new
+    for key in _WEIGHT_KEYS:
+        st.session_state[key] = _round(st.session_state[key] * WEIGHT_UNITS[old_weight] / WEIGHT_UNITS[new_weight])
+    st.session_state._units_prev = st.session_state.units
 
 
 def _init_state() -> None:
     if "preset" in st.session_state:
         return
+    us = next(iter(UNIT_SYSTEMS))
     st.session_state.update(
+        units=us,
+        _units_prev=us,
         preset="CHEP",
+        p_len=40.0,
+        p_wid=48.0,
+        p_deck=6.0,
+        p_height=DEFAULT_BUILD_HEIGHT["in"],
+        p_maxw=2200.0,
         p_maxvol=0.0,
         p_maxarea=0.0,
         c_len=12.0,
         c_wid=10.0,
         c_hgt=8.0,
         c_weight=20.0,
-        c_unit="in",
-        _c_unit_prev="in",
         c_tsu=True,
-        mode=MODE_MAX,
-        qty=40,
+        ga_on=True,
+        ga_gens=40,
+        ga_pop=24,
+        ga_seed=0,
     )
     _apply_preset()
 
@@ -142,16 +157,19 @@ def _num(label: str, key: str, *, on_change=None, help: str | None = None, min_v
 # --- Solving --------------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def _solve(pallet_args: dict, case_args: dict, mode: str, qty: int):
+def _solve(pallet_args: dict, case_args: dict, ga: tuple[int, int, int] | None):
     pallet = Pallet(**pallet_args)
     case = Case(**case_args)
-    if mode == MODE_MAX:
-        count, result = maximize_case_count(pallet, case)
-        # Re-solve one more case to explain what stops the count going higher.
-        limit = solve_pallet_layout(pallet, [Case(**{**case_args, "quantity": count + 1})]).violations if count else []
-        return count, result, limit
-    result = solve_pallet_layout(pallet, [Case(**{**case_args, "quantity": qty})])
-    return len(result.placements), result, []
+    options = {"optimize": ga is not None}
+    if ga is not None:
+        options.update(optimization_generations=ga[0], optimization_population=ga[1], optimization_seed=ga[2])
+    count, result = maximize_case_count(pallet, case, **options)
+    # Re-solve one more case to explain what stops the count going higher.
+    limit = (
+        solve_pallet_layout(pallet, [Case(**{**case_args, "quantity": count + 1})], **options).violations
+        if count else []
+    )
+    return count, result, limit
 
 
 def _summarize_violations(violations: list[str]) -> list[str]:
@@ -267,6 +285,7 @@ def _render_3d(pallet: Pallet, result) -> None:
             "yaxis": {"title": f"Width ({unit})"},
             "zaxis": {"title": f"Height ({unit})"},
             "camera": views[0][1]["scene.camera"],
+            "dragmode": "turntable",  # spin about the vertical axis so the pallet stays upright
         },
         updatemenus=[{
             "type": "buttons", "direction": "right", "x": 0, "y": 1.07, "xanchor": "left",
@@ -274,8 +293,12 @@ def _render_3d(pallet: Pallet, result) -> None:
             "buttons": [{"label": label, "method": "relayout", "args": [args]} for label, args in views],
         }],
     )
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "scrollZoom": True})
-    st.caption("Drag to spin · scroll to zoom · right-drag to pan · buttons reset the viewpoint. "
+    st.plotly_chart(fig, width="stretch", config={
+        "displaylogo": False,
+        "scrollZoom": True,
+        "modeBarButtonsToRemove": ["orbitRotation", "pan3d"],
+    })
+    st.caption("Drag to spin · scroll to zoom · buttons reset the viewpoint. "
                "Brown = pallet deck, red dashes = max build height.")
 
 
@@ -321,6 +344,57 @@ def _render_plan(pallet: Pallet, placements) -> None:
     plt.close(fig)
 
 
+def _render_solver_status(result) -> None:
+    runs = result.solver_runs
+    if not runs:
+        return
+    st.markdown("**Solver status**")
+    st.dataframe(
+        [
+            {
+                "Solver": run.solver,
+                "Layers": run.family,
+                "Per layer": run.cases_per_layer if run.ran else None,
+                "Bound": run.target,
+                "Used": "\u2714" if run.selected else "",
+                "Note": run.note,
+            }
+            for run in runs
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+    ga_runs = [run for run in runs if run.history]
+    if not ga_runs:
+        return
+    fig = go.Figure()
+    for run in ga_runs:
+        generations = [entry[0] for entry in run.history]
+        suffix = f" ({run.family})" if len(ga_runs) > 1 else ""
+        fig.add_scatter(x=generations, y=[entry[1] for entry in run.history], mode="lines+markers",
+                        name=f"GA best{suffix}", marker={"size": 4})
+        fig.add_scatter(x=generations, y=[entry[2] for entry in run.history], mode="lines",
+                        name=f"GA mean{suffix}", line={"dash": "dot"})
+        block = next((r for r in runs if r.solver == "Block packer" and r.family == run.family), None)
+        # The block packer scored on the same objective: placed - penalty x (bound - placed).
+        if block is not None:
+            fig.add_hline(y=2 * block.cases_per_layer - block.target, line={"color": "#94a3b8", "dash": "dash"},
+                          annotation_text="block packer", annotation_position="bottom right")
+        fig.add_hline(y=run.target, line={"color": "#ef4444", "dash": "dash"},
+                      annotation_text="bound (optimum)", annotation_position="top right")
+    fig.update_layout(
+        height=230,
+        margin={"l": 0, "r": 0, "t": 10, "b": 0},
+        xaxis_title="Generation",
+        yaxis_title="Objective",
+        legend={"orientation": "h", "y": -0.35, "font": {"size": 10}},
+    )
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
+    st.caption("Objective per layer = cases placed \u2212 cases short of the malleable bound, so the bound is "
+               "the optimum. The best line never drops (elitism); the gap to the red line is what's left.")
+
+
 def _placement_rows(result) -> list[dict]:
     layer_index = {z: n for n, z in enumerate(sorted({p.z for p in result.placements}), start=1)}
     return [
@@ -348,69 +422,54 @@ with st.sidebar:
     st.markdown(f"### 📦 Pallet Builder <span style='font-size:0.7rem;opacity:0.6'>v{APP_VERSION}</span>",
                 unsafe_allow_html=True)
 
+    _section("Units")
+    st.selectbox("System", list(UNIT_SYSTEMS), key="units", on_change=_convert_units,
+                 help="Applies to every length and weight. Switching converts the values already entered.")
+    p_unit, w_unit_label = _units()
+
+    st.divider()
     _section("Pallet")
     st.selectbox("Preset", [*sorted(STANDARD_PALLETS), CUSTOM], key="preset", format_func=_preset_label,
                  on_change=_apply_preset)
-    c1, c2 = st.columns(2)
-    c1.selectbox("Length unit", LENGTH_UNITS, key="p_unit", on_change=_convert_pallet_unit)
-    c2.selectbox("Weight unit", list(WEIGHT_UNITS), key="w_unit", on_change=_convert_weight_unit,
-                 help="Applies to pallet max weight and case weight.")
-    c1, c2 = st.columns(2)
-    with c1:
-        _num("Length", "p_len", on_change=_mark_custom, min_value=0.001)
-    with c2:
-        _num("Width", "p_wid", on_change=_mark_custom, min_value=0.001)
-    c1, c2 = st.columns(2)
-    with c1:
-        _num("Max build height", "p_height",
-             help="Floor to top of load, including the pallet. Sets how many layers stack. "
-                  "0 = no limit (single layer).")
-    with c2:
-        _num("Deck height", "p_deck", on_change=_mark_custom, min_value=0.001,
-             help="The pallet's own height; counts toward the max build height.")
-    c1, c2 = st.columns(2)
-    with c1:
-        _num("Max weight", "p_maxw", on_change=_mark_custom, help="Total case weight. 0 = no limit.")
+    _num(f"Length ({p_unit})", "p_len", on_change=_mark_custom, min_value=0.001)
+    _num(f"Width ({p_unit})", "p_wid", on_change=_mark_custom, min_value=0.001)
+    _num(f"Max build height ({p_unit})", "p_height",
+         help="Floor to top of load, including the pallet. Sets how many layers stack. "
+              "0 = no limit (single layer).")
+    _num(f"Deck height ({p_unit})", "p_deck", on_change=_mark_custom, min_value=0.001,
+         help="The pallet's own height; counts toward the max build height.")
+    _num(f"Max weight ({w_unit_label})", "p_maxw", on_change=_mark_custom, help="Total case weight. 0 = no limit.")
     with st.expander("More limits", expanded=False):
-        c1, c2 = st.columns(2)
-        with c1:
-            _num(f"Max volume ({st.session_state.p_unit}³)", "p_maxvol", help="0 = no limit.")
-        with c2:
-            _num(f"Max plan area ({st.session_state.p_unit}²)", "p_maxarea",
-                 help="Combined case footprint. 0 = no limit.")
+        _num(f"Max volume ({p_unit}³)", "p_maxvol", help="0 = no limit.")
+        _num(f"Max plan area ({p_unit}²)", "p_maxarea", help="Combined case footprint. 0 = no limit.")
 
     st.divider()
     _section("Case")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        _num("Length", "c_len", min_value=0.001)
-    with c2:
-        _num("Width", "c_wid", min_value=0.001)
-    with c3:
-        _num("Height", "c_hgt", min_value=0.001)
-    c1, c2 = st.columns(2)
-    with c1:
-        _num(f"Weight ({st.session_state.w_unit})", "c_weight")
-    c2.selectbox("Unit", LENGTH_UNITS, key="c_unit", on_change=_convert_case_unit)
+    _num(f"Length ({p_unit})", "c_len", min_value=0.001)
+    _num(f"Width ({p_unit})", "c_wid", min_value=0.001)
+    _num(f"Height ({p_unit})", "c_hgt", min_value=0.001)
+    _num(f"Weight ({w_unit_label})", "c_weight")
     st.toggle("This side up", key="c_tsu",
               help="Off lets the solver lay cases on a side or end. Every case in a layer still shares one "
                    "height, so each layer top stays flat.")
 
     st.divider()
     _section("Solve")
-    st.segmented_control("Mode", [MODE_MAX, MODE_FIXED], key="mode", label_visibility="collapsed")
-    if st.session_state.mode == MODE_FIXED:
-        st.number_input("Quantity", key="qty", min_value=1, step=1)
-    else:
-        st.caption("Stacks as many full, flat layers as fit the build height, within the weight and other limits.")
+    st.toggle("GA layer search", key="ga_on",
+              help="Genetic algorithm that targets the malleable bound (deck area / case footprint) per "
+                   "layer and penalizes cases that don't fit. Runs where the block packer falls short.")
+    if st.session_state.ga_on:
+        st.number_input("Generations", key="ga_gens", min_value=1, max_value=500, step=1)
+        st.number_input("Population", key="ga_pop", min_value=4, max_value=200, step=1)
+        st.number_input("Seed", key="ga_seed", min_value=0, step=1)
 
 ss = st.session_state
-mode = ss.mode or MODE_MAX
+ga_args = (ss.ga_gens, ss.ga_pop, ss.ga_seed) if ss.ga_on else None
 pallet_args = {
     "length": ss.p_len,
     "width": ss.p_wid,
     "height": ss.p_height or None,
-    "unit": ss.p_unit,
+    "unit": p_unit,
     "max_weight": ss.p_maxw or None,
     "max_volume": ss.p_maxvol or None,
     "max_plan_area": ss.p_maxarea or None,
@@ -423,7 +482,7 @@ case_args = {
     "width": ss.c_wid,
     "height": ss.c_hgt,
     "weight": ss.c_weight,
-    "unit": ss.c_unit,
+    "unit": p_unit,
     "this_side_up": ss.c_tsu,
 }
 
@@ -432,23 +491,19 @@ case_args = {
 try:
     pallet = Pallet(**pallet_args)
     with st.spinner("Solving…"):
-        count, result, limit_violations = _solve(pallet_args, case_args, mode, ss.qty)
+        count, result, limit_violations = _solve(pallet_args, case_args, ga_args)
 except ValueError as exc:
     st.error(f"Invalid input: {exc}")
     st.stop()
 
-w_unit = ss.w_unit
+w_unit = w_unit_label
 unit = pallet.unit
 placed_weight = count * ss.c_weight
 load_height = max((p.z + p.height for p in result.placements), default=0.0)
 build_height = (pallet.deck_height or 0.0) + load_height
 
-if mode == MODE_MAX:
-    ok = count > 0
-    headline = f"{count} cases fit" if ok else "No cases fit"
-else:
-    ok = result.feasible
-    headline = f"All {ss.qty} cases fit" if ok else f"{count} of {ss.qty} cases placed"
+ok = count > 0
+headline = f"{count} cases fit" if ok else "No cases fit"
 if count:
     headline += f" · {result.layers} layer{'s' if result.layers != 1 else ''} × {result.cases_per_layer}"
 
@@ -456,7 +511,7 @@ pallet_name = pallet.name or "Custom pallet"
 st.markdown(f"#### {headline}")
 st.caption(
     f"{pallet_name} · {pallet.length:g}×{pallet.width:g} {unit} deck · "
-    f"case {ss.c_len:g}×{ss.c_wid:g}×{ss.c_hgt:g} {ss.c_unit} · {mode.lower()}"
+    f"case {ss.c_len:g}×{ss.c_wid:g}×{ss.c_hgt:g} {p_unit}"
 )
 
 view_col, info_col = st.columns([1.5, 1], gap="large")
@@ -477,8 +532,10 @@ with info_col:
         if pallet.height else "No build height limit"
     )
     m1, m2 = st.columns(2)
-    m1.metric("Status", "Feasible" if ok else "Infeasible")
-    m2.metric("Cases", count)
+    m1.metric("Cases", count)
+    m2.metric("Malleable bound", result.volume_bound,
+              help="Cases that would fit if they were perfectly malleable: the space above the deck up to "
+                   "the build height divided by case volume. Ignores weight and other limits.")
     m1.metric("Layers", f"{result.layers} × {result.cases_per_layer}" if count else "0",
               help=f"Layers × cases per layer. Up to {result.max_layers} layers fit the build height.")
     m2.metric("Cube use", f"{result.volume_utilization:.1%}" if pallet.height else "–",
@@ -493,7 +550,7 @@ with info_col:
     m2.metric("Headroom", f"{pallet.height - build_height:g} {unit}" if pallet.height else "–",
               help="Space left under the max build height.")
 
-    if mode == MODE_MAX and ok:
+    if ok:
         if count == result.capacity:
             if pallet.height:
                 st.info(f"Limited by **pallet space**: {result.max_layers} layers of {result.cases_per_layer} "
@@ -502,7 +559,7 @@ with info_col:
                 st.info("Single layer: set a **max build height** to stack layers.")
         elif limit_violations:
             st.info(f"Limited by **{_limit_reason(limit_violations)}**: one more case would break it.")
-    if result.violations and not (mode == MODE_MAX and ok):
+    if not ok and result.violations:
         st.error("\n".join(f"- {v}" for v in _summarize_violations(result.violations)))
 
     rotated = sum(1 for p in result.placements if p.orientation[:2] != (0, 1))
@@ -510,6 +567,7 @@ with info_col:
     partial = count - (result.layers - 1) * result.cases_per_layer if count else 0
     top_note = f" · top layer {partial} of {result.cases_per_layer}" if count and partial < result.cases_per_layer else ""
     st.caption(f"{count - rotated} as entered · {rotated} rotated · {tipped} tipped{top_note}")
+    _render_solver_status(result)
 
 table_tab, export_tab = st.tabs(["Placements", "Export"])
 with table_tab:
@@ -519,8 +577,7 @@ with export_tab:
         "pallet": pallet_args,
         "case": case_args,
         "weight_unit": w_unit,
-        "mode": mode,
-        "quantity": ss.qty if mode == MODE_FIXED else None,
+        "ga": {"generations": ga_args[0], "population": ga_args[1], "seed": ga_args[2]} if ga_args else None,
         "result": {
             "cases": count,
             "feasible": ok,
@@ -531,6 +588,13 @@ with export_tab:
             "deck_coverage": result.utilization,
             "cube_utilization": result.volume_utilization,
             "placed_weight": placed_weight,
+            "malleable_bound": result.volume_bound,
+            "solver_runs": [
+                {"solver": r.solver, "family": r.family, "ran": r.ran, "selected": r.selected,
+                 "cases_per_layer": r.cases_per_layer, "target": r.target, "note": r.note,
+                 "history": [list(h) for h in r.history]}
+                for r in result.solver_runs
+            ],
             "violations": result.violations,
             "placements": _placement_rows(result),
         },

@@ -181,6 +181,22 @@ class Placement:
 
 
 @dataclass
+class SolverRun:
+    """One solver attempt at a layer pattern, kept so callers can show how the result was found."""
+
+    solver: str
+    family: str
+    cases_per_layer: int
+    target: int
+    layers: int
+    ran: bool = True
+    selected: bool = False
+    note: str = ""
+    # (generation, best objective, mean objective) per GA generation; empty for other solvers.
+    history: tuple[tuple[int, float, float], ...] = ()
+
+
+@dataclass
 class LayoutResult:
     placements: list[Placement]
     total_weight: float
@@ -193,6 +209,9 @@ class LayoutResult:
     cases_per_layer: int = 0
     max_layers: int = 0
     volume_utilization: float = 0.0
+    solver_runs: list[SolverRun] = field(default_factory=list)
+    # Cases that would fit if they were perfectly malleable (space above the deck / case volume).
+    volume_bound: int = 0
 
     @property
     def capacity(self) -> int:
@@ -281,37 +300,6 @@ def _split_free_rectangles(
         if candidate[2] > 1e-9 and candidate[3] > 1e-9 and candidate not in deduped:
             deduped.append(candidate)
     return deduped
-
-
-def _candidate_positions(
-    case: Case,
-    free_rectangles: Sequence[tuple[float, float, float, float]],
-    max_height: float | None = None,
-) -> list[tuple[float, float, float, float, tuple[int, int, int]]]:
-    orientations = _orientations_for(case)
-    if max_height is not None:
-        # Prefer orientations under the height limit; if none of them can be placed, fall back to
-        # all orientations so the height check reports the real reason instead of a footprint error.
-        within_height = [o for o in orientations if case.oriented_dimensions(o)[2] <= max_height + 1e-9]
-        positions = _positions_for_orientations(case, within_height, free_rectangles)
-        if positions:
-            return positions
-    return _positions_for_orientations(case, orientations, free_rectangles)
-
-
-def _positions_for_orientations(
-    case: Case,
-    orientations: Sequence[tuple[int, int, int]],
-    free_rectangles: Sequence[tuple[float, float, float, float]],
-) -> list[tuple[float, float, float, float, tuple[int, int, int]]]:
-    positions: list[tuple[float, float, float, float, tuple[int, int, int]]] = []
-    for orientation in orientations:
-        length, width, _ = case.oriented_dimensions(orientation)
-        for rect_x, rect_y, rect_w, rect_h in free_rectangles:
-            if length <= rect_w and width <= rect_h:
-                positions.append((rect_x, rect_y, length, width, orientation))
-    positions.sort(key=lambda item: (item[2] * item[3], item[0], item[1]))
-    return positions
 
 
 # Above this many (x, y) normal-position states the recursive guillotine search gets slow in pure
@@ -408,6 +396,96 @@ def _block_layout(
     return tuple(sorted(spots, key=lambda spot: (spot[1], spot[0])))
 
 
+# The GA's per-layer target is the malleable bound (deck area / case footprint); every case short of
+# it costs this much, so the objective peaks at the bound itself.
+_GA_UNPLACED_PENALTY = 1.0
+# Above this many cases per layer the bottom-left decoder gets slow in pure Python.
+_GA_MAX_TARGET = 150
+
+GASettings = tuple[int, int, int]  # (generations, population, seed)
+DEFAULT_GA: GASettings = (40, 24, 0)
+
+
+@lru_cache(maxsize=64)
+def _ga_layer(
+    length: float,
+    width: float,
+    footprints: tuple[tuple[float, float], ...],
+    generations: int,
+    population: int,
+    seed: int,
+) -> tuple[tuple[tuple[float, float, int], ...], tuple[tuple[int, float, float], ...]]:
+    """Genetic search for a single-layer pattern of identical rectangles.
+
+    A chromosome holds one gene per case up to the malleable target; each gene picks the case's
+    preferred footprint orientation. Decoding places cases in order at the bottom-left-most free
+    position (falling back to the other orientation), which can produce interlocking, non-guillotine
+    patterns. Objective = placed - penalty x unplaced. Returns the best spots and the per-generation
+    (generation, best, mean) objective history.
+    """
+    target = int((length * width + 1e-9) // (footprints[0][0] * footprints[0][1]))
+    rng = random.Random(seed)
+    choices = len(footprints)
+    cache: dict[tuple[int, ...], tuple[float, tuple[tuple[float, float, int], ...]]] = {}
+
+    def decode(genes: tuple[int, ...]) -> tuple[tuple[float, float, int], ...]:
+        free = [(0.0, 0.0, length, width)]
+        spots: list[tuple[float, float, int]] = []
+        for gene in genes:
+            best = None
+            for index in (gene, *(i for i in range(choices) if i != gene)):
+                fp_l, fp_w = footprints[index]
+                for rect_x, rect_y, rect_w, rect_h in free:
+                    if fp_l <= rect_w + 1e-9 and fp_w <= rect_h + 1e-9 and (best is None or (rect_y, rect_x) < best[0]):
+                        best = ((rect_y, rect_x), rect_x, rect_y, index)
+                if best is not None:
+                    break
+            if best is None:
+                break  # identical cases: if this one fits nowhere, none of the rest will
+            _, x, y, index = best
+            spots.append((round(x, 9), round(y, 9), index))
+            free = _split_free_rectangles(free, x, y, *footprints[index])
+        return tuple(spots)
+
+    def evaluate(genes: tuple[int, ...]) -> tuple[float, tuple[tuple[float, float, int], ...]]:
+        if genes not in cache:
+            spots = decode(genes)
+            cache[genes] = (len(spots) - _GA_UNPLACED_PENALTY * (target - len(spots)), spots)
+        return cache[genes]
+
+    def tournament(scored: list[tuple[float, tuple[int, ...]]]) -> tuple[int, ...]:
+        return max(rng.sample(scored, min(3, len(scored))))[1]
+
+    pop = [tuple([0] * target), tuple([1 % choices] * target), tuple(i % choices for i in range(target))]
+    while len(pop) < population:
+        pop.append(tuple(rng.randrange(choices) for _ in range(target)))
+
+    history: list[tuple[int, float, float]] = []
+    for generation in range(generations + 1):
+        scored = sorted(((evaluate(genes)[0], genes) for genes in pop), reverse=True)
+        best_objective, best_genes = scored[0]
+        history.append((generation, best_objective, sum(score for score, _ in scored) / len(scored)))
+        if len(evaluate(best_genes)[1]) >= target or generation == generations:
+            break
+        children = [genes for _, genes in scored[:2]]  # elitism
+        while len(children) < population:
+            first, second = tournament(scored), tournament(scored)
+            cut_a, cut_b = sorted(rng.sample(range(target + 1), 2))  # two-point crossover
+            child = list(first[:cut_a] + second[cut_a:cut_b] + first[cut_b:])
+            for i in range(target):
+                if rng.random() < 1.5 / target:
+                    child[i] = rng.randrange(choices)
+            if rng.random() < 0.3:  # block mutation: re-orient a run of consecutive cases
+                start, end = sorted(rng.sample(range(target + 1), 2))
+                value = rng.randrange(choices)
+                child[start:end] = [value] * (end - start)
+            children.append(tuple(child))
+        pop = children
+
+    spots = evaluate(best_genes)[1]
+    return tuple(sorted(spots, key=lambda spot: (spot[1], spot[0]))), tuple(history)
+
+
 @dataclass(frozen=True)
 class _LayerPlan:
     spots: tuple[tuple[float, float, int], ...]
@@ -420,43 +498,81 @@ class _LayerPlan:
         return self.layers * len(self.spots)
 
 
-def _plan_layers(pallet: Pallet, case: Case) -> _LayerPlan | None:
+def _plan_layers(pallet: Pallet, case: Case, ga: GASettings | None = DEFAULT_GA) -> tuple[_LayerPlan | None, list[SolverRun]]:
     """Pick the orientation family that stacks the most cases within the build height.
 
-    Orientations are grouped by which case dimension stands vertical; each group gets its own
-    block-packed layer pattern, repeated for as many layers as fit. Ties favour more cases per
-    layer (a wider, more stable base). If no orientation fits the height at all, the best layer is
-    returned with ``layers=0`` so the caller can report the height violation.
+    Orientations are grouped by which case dimension stands vertical, so every layer has one height
+    and a flat top. Each family gets a layer pattern from the block packer and, when it falls short
+    of the malleable bound, from the GA; the better pattern is repeated for as many layers as fit.
+    Ties favour more cases per layer. If no orientation fits the height, the best layer is returned
+    with ``layers=0`` so the caller can report the height violation. Also returns a log of every
+    solver run.
     """
     limit = pallet.load_height_limit
     groups: dict[float, list[tuple[int, int, int]]] = {}
     for orientation in _orientations_for(case):
         groups.setdefault(round(case.oriented_dimensions(orientation)[2], 9), []).append(orientation)
 
-    best: _LayerPlan | None = None
+    best: tuple[_LayerPlan, SolverRun] | None = None
+    runs: list[SolverRun] = []
+    length, width = round(pallet.length, 9), round(pallet.width, 9)
     for layer_height, orientations in groups.items():
         footprints: list[tuple[float, float]] = []
         footprint_orientations: list[tuple[int, int, int]] = []
         for orientation in orientations:
-            length, width, _ = case.oriented_dimensions(orientation)
-            footprint = (round(length, 9), round(width, 9))
+            fp_l, fp_w, _ = case.oriented_dimensions(orientation)
+            footprint = (round(fp_l, 9), round(fp_w, 9))
             if footprint not in footprints:
                 footprints.append(footprint)
                 footprint_orientations.append(orientation)
-        spots = _block_layout(round(pallet.length, 9), round(pallet.width, 9), tuple(footprints))
-        if not spots:
-            continue
         layers = 1 if limit is None else int((limit + 1e-9) // layer_height)
-        plan = _LayerPlan(spots, tuple(footprint_orientations), layer_height, layers)
-        if best is None or (plan.capacity, len(plan.spots)) > (best.capacity, len(best.spots)):
-            best = plan
-    return best
+        target = int((length * width + 1e-9) // (footprints[0][0] * footprints[0][1]))
+        family = f"{layer_height:g} {pallet.unit} tall layers"
+
+        spots = _block_layout(length, width, tuple(footprints))
+        candidates = [(spots, SolverRun("Block packer", family, len(spots), target, layers,
+                                        note="Recursive guillotine search over block patterns."))]
+        if ga is not None:
+            skip = None
+            if len(spots) >= target:
+                skip = "Skipped: the block packer already reaches the bound."
+            elif len(footprints) < 2:
+                skip = "Skipped: a square footprint has only one orientation."
+            elif target > _GA_MAX_TARGET:
+                skip = f"Skipped: target of {target} cases per layer exceeds the GA limit of {_GA_MAX_TARGET}."
+            if skip:
+                runs_note = SolverRun("Genetic algorithm", family, 0, target, layers, ran=False, note=skip)
+                candidates.append(((), runs_note))
+            else:
+                ga_spots, history = _ga_layer(length, width, tuple(footprints), *ga)
+                note = f"{len(history) - 1} generations, population {ga[1]}, seed {ga[2]}."
+                candidates.append((ga_spots, SolverRun("Genetic algorithm", family, len(ga_spots), target, layers,
+                                                       note=note, history=history)))
+
+        family_spots, family_run = candidates[0]
+        for cand_spots, run in candidates[1:]:
+            if len(cand_spots) > len(family_spots):  # the GA must strictly beat the block packer
+                family_spots, family_run = cand_spots, run
+        runs.extend(run for _, run in candidates)
+        if not family_spots:
+            continue
+        plan = _LayerPlan(family_spots, tuple(footprint_orientations), layer_height, layers)
+        if best is None or (plan.capacity, len(plan.spots)) > (best[0].capacity, len(best[0].spots)):
+            best = (plan, family_run)
+
+    if best is None:
+        return None, runs
+    best[1].selected = True
+    return best[0], runs
 
 
-def _pack_single_type(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], list[str], _LayerPlan | None]:
-    plan = _plan_layers(pallet, cases[0])
+def _pack_layer(
+    pallet: Pallet, cases: Sequence[Case], ga: GASettings | None = DEFAULT_GA
+) -> tuple[list[Placement], list[str], _LayerPlan | None, list[SolverRun]]:
+    """Stack identical cases in flat layers; returns placements, violations, the plan and solver log."""
+    plan, runs = _plan_layers(pallet, cases[0], ga)
     if plan is None:
-        return [], ["No cases could be placed on the pallet."], None
+        return [], ["No cases could be placed on the pallet."], None, runs
 
     per_layer = len(plan.spots)
     # Stack whole layers; a partial top layer fills from the origin outward. With no layer fitting
@@ -467,70 +583,11 @@ def _pack_single_type(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Place
         layer, slot = divmod(index, per_layer)
         x, y, footprint_index = plan.spots[slot]
         orientation = plan.orientations[footprint_index]
-        length, width, height = item.oriented_dimensions(orientation)
-        placements.append(Placement(item.name, x, y, layer * plan.layer_height, length, width, height, orientation))
+        fp_l, fp_w, height = item.oriented_dimensions(orientation)
+        placements.append(Placement(item.name, x, y, layer * plan.layer_height, fp_l, fp_w, height, orientation))
 
     violations = [f"No feasible footprint for case {item.name!r} on the pallet." for item in cases[len(placements):]]
-    return placements, violations, plan
-
-
-def _pack_layer(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], list[str], tuple[int, int, int]]:
-    """Pack the load; returns placements, violations and (layers used, cases per layer, max layers)."""
-    if cases and _single_case_type(cases):
-        placements, violations, plan = _pack_single_type(pallet, cases)
-        if plan is None:
-            return placements, violations, (0, 0, 0)
-        layers_used = len({placement.z for placement in placements})
-        return placements, violations, (layers_used, len(plan.spots), plan.layers)
-    placements, _, violations = _pack_greedy(pallet, cases)
-    return placements, violations, (1 if placements else 0, len(placements), 1)
-
-
-def _pack_greedy(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
-    free_rectangles: list[tuple[float, float, float, float]] = [(0.0, 0.0, pallet.length, pallet.width)]
-    placements: list[Placement] = []
-    used_area = 0.0
-    violations: list[str] = []
-
-    for case in sorted(cases, key=lambda item: (item.length * item.width, max(item.length, item.width), item.height), reverse=True):
-        candidate: tuple[float, float, float, float, tuple[int, int, int]] | None = None
-        for position in _candidate_positions(case, free_rectangles, pallet.load_height_limit):
-            x, y, length, width, orientation = position
-            if candidate is None or (length * width) > (candidate[2] * candidate[3]):
-                candidate = (x, y, length, width, orientation)
-        if candidate is None:
-            violations.append(f"No feasible footprint for case {case.name!r} on the pallet.")
-            continue
-
-        x, y, length, width, orientation = candidate
-        placements.append(
-            Placement(
-                case_name=case.name,
-                x=x,
-                y=y,
-                z=0.0,
-                length=length,
-                width=width,
-                height=case.oriented_dimensions(orientation)[2],
-                orientation=orientation,
-            )
-        )
-        used_area += length * width
-        free_rectangles = _split_free_rectangles(free_rectangles, x, y, length, width)
-
-    if not placements:
-        return [], 0.0, ["No cases could be placed on the pallet."]
-
-    return placements, used_area / pallet.plan_area, violations
-
-
-def _score_layout_result(pallet: Pallet, result: LayoutResult) -> float:
-    if not result.feasible:
-        return -1_000_000.0 - 100.0 * len(result.violations) - 0.001 * result.overhang - 0.001 * result.underhang
-    score = result.utilization
-    score -= 0.001 * result.overhang
-    score -= 0.001 * result.underhang
-    return score
+    return placements, violations, plan, runs
 
 
 def maximize_case_count(
@@ -538,12 +595,18 @@ def maximize_case_count(
     case: Case | dict[str, float | str | int],
     *,
     progress_callback: callable | None = None,
+    optimize: bool = True,
+    optimization_generations: int = DEFAULT_GA[0],
+    optimization_population: int = DEFAULT_GA[1],
+    optimization_seed: int = DEFAULT_GA[2],
 ) -> tuple[int, LayoutResult]:
     """Return the maximum number of identical cases that fit on a pallet.
 
     Capacity is the number of layers that fit the build height times the cases per layer, capped
     by the weight, volume and plan-area limits. Returns the count and the layout that achieves it.
     ``progress_callback`` is kept for compatibility and is called once with the final result.
+    With ``optimize`` the GA searches for a denser layer wherever the block packer falls short of the
+    malleable bound; ``LayoutResult.solver_runs`` records what each solver found.
     """
 
     case = _coerce_case(case, pallet.unit)
@@ -554,7 +617,14 @@ def maximize_case_count(
     if case.quantity <= 0:
         raise ValueError("Case quantity must be positive for max-case search.")
 
-    plan = _plan_layers(pallet, case)
+    ga = (optimization_generations, optimization_population, optimization_seed) if optimize else None
+    solve_options = {
+        "optimize": optimize,
+        "optimization_generations": optimization_generations,
+        "optimization_population": optimization_population,
+        "optimization_seed": optimization_seed,
+    }
+    plan, _ = _plan_layers(pallet, case, ga)
     count = plan.capacity if plan is not None else 0
     if pallet.max_weight is not None and case.weight > 0:
         count = min(count, int(pallet.max_weight // case.weight))
@@ -565,20 +635,21 @@ def maximize_case_count(
 
     if count <= 0:
         # Solve a single case so the caller sees which limit (height, weight, ...) rules it out.
-        return _explain_single_case(pallet, case)
+        return _explain_single_case(pallet, case, solve_options)
 
-    result = solve_pallet_layout(pallet, [replace(case, quantity=count)])
+    result = solve_pallet_layout(pallet, [replace(case, quantity=count)], **solve_options)
     if progress_callback is not None:
         progress_callback(1, count, count, count, result)
     if not result.feasible:
-        return _explain_single_case(pallet, case)
+        return _explain_single_case(pallet, case, solve_options)
     return count, result
 
 
-def _explain_single_case(pallet: Pallet, case: Case) -> tuple[int, LayoutResult]:
-    result = solve_pallet_layout(pallet, [replace(case, quantity=1)])
+def _explain_single_case(pallet: Pallet, case: Case, solve_options: dict | None = None) -> tuple[int, LayoutResult]:
+    result = solve_pallet_layout(pallet, [replace(case, quantity=1)], **(solve_options or {}))
     violations = result.violations or ["No cases fit on this pallet."]
-    return 0, LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, violations)
+    return 0, LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, violations, solver_runs=result.solver_runs,
+                           volume_bound=result.volume_bound)
 
 
 def _single_case_type(cases: Sequence[Case]) -> bool:
@@ -592,8 +663,9 @@ def _evaluate_load(
     pallet: Pallet,
     cases: Sequence[Case],
     violations: list[str] | None = None,
+    ga: GASettings | None = DEFAULT_GA,
 ) -> LayoutResult:
-    placements, packing_violations, (layers, per_layer, max_layers) = _pack_layer(pallet, cases)
+    placements, packing_violations, plan, runs = _pack_layer(pallet, cases, ga)
     violations = [*(violations or []), *packing_violations]
 
     overhang = 0.0
@@ -606,6 +678,7 @@ def _evaluate_load(
     base_area = sum(placement.length * placement.width for placement in base)
     underhang = max(0.0, pallet.plan_area - base_area)
 
+    case = cases[0]
     limit = pallet.load_height_limit
     volume_utilization = 0.0
     if limit is not None:
@@ -617,111 +690,46 @@ def _evaluate_load(
             )
         placed_volume = sum(placement.length * placement.width * placement.height for placement in placements)
         volume_utilization = placed_volume / (pallet.plan_area * limit)
+        volume_bound = int((pallet.plan_area * limit + 1e-9) // case.volume)
+    else:
+        # No build limit means a single layer: the bound is deck area over the smallest footprint.
+        smallest = min(case.oriented_dimensions(o)[0] * case.oriented_dimensions(o)[1] for o in _orientations_for(case))
+        volume_bound = int((pallet.plan_area + 1e-9) // smallest)
 
     return LayoutResult(
         placements=placements,
-        total_weight=sum(case.weight for case in cases),
+        total_weight=sum(item.weight for item in cases),
         utilization=base_area / pallet.plan_area,
         overhang=overhang,
         underhang=underhang,
         feasible=not violations and len(placements) == len(cases),
         violations=violations,
-        layers=layers,
-        cases_per_layer=per_layer,
-        max_layers=max_layers,
+        layers=len({placement.z for placement in placements}),
+        cases_per_layer=len(plan.spots) if plan else 0,
+        max_layers=plan.layers if plan else 0,
         volume_utilization=volume_utilization,
+        solver_runs=runs,
+        volume_bound=volume_bound,
     )
-
-
-def _evaluate_case_order(
-    pallet: Pallet,
-    cases: Sequence[Case],
-) -> tuple[float, LayoutResult]:
-    result = _evaluate_load(pallet, cases)
-    return _score_layout_result(pallet, result), result
 
 
 def optimize_layout(
     pallet: Pallet,
     cases: Iterable[Case | dict[str, float | str | int]],
     *,
-    generations: int = 12,
-    population_size: int = 12,
-    seed: int = 0,
+    generations: int = DEFAULT_GA[0],
+    population_size: int = DEFAULT_GA[1],
+    seed: int = DEFAULT_GA[2],
 ) -> LayoutResult:
-    """GA-style improvement stage on top of the baseline greedy packer.
-
-    The optimizer keeps the original greedy order as a baseline candidate and explores a small
-    population of alternative case orders and placement priorities to select the best feasible
-    layout by utilization and penalty score.
-    """
-
-    rng = random.Random(seed)
-    normalized_cases = [_coerce_case(item, pallet.unit) for item in cases]
-
-    expanded_cases = _expand_case_quantities(normalized_cases)
-    if not expanded_cases:
-        return LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases available to place."])
-
-    if not _single_case_type(expanded_cases):
-        total_weight = sum(case.weight for case in expanded_cases)
-        return LayoutResult(
-            placements=[],
-            total_weight=total_weight,
-            utilization=0.0,
-            overhang=0.0,
-            underhang=0.0,
-            feasible=False,
-            violations=["This solver supports a single case type per pallet for now."],
-        )
-
-    baseline_order = expanded_cases[:]
-    _, baseline_result = _evaluate_case_order(pallet, baseline_order)
-    if baseline_result.feasible:
-        return baseline_result
-
-    population: list[list[Case]] = [
-        baseline_order[:],
-        sorted(expanded_cases, key=lambda case: (case.length * case.width, max(case.length, case.width), case.height)),
-        sorted(expanded_cases, key=lambda case: (max(case.length, case.width), case.length * case.width, case.height), reverse=True),
-        sorted(expanded_cases, key=lambda case: (case.weight, case.length * case.width), reverse=True),
-    ]
-
-    for _ in range(max(1, population_size - len(population))):
-        shuffled = expanded_cases[:]
-        rng.shuffle(shuffled)
-        population.append(shuffled)
-
-    best_result: LayoutResult | None = baseline_result
-    best_score = _score_layout_result(pallet, baseline_result)
-    for _ in range(generations):
-        scored = []
-        for candidate in population:
-            score, result = _evaluate_case_order(pallet, candidate)
-            scored.append((score, candidate, result))
-        scored.sort(key=lambda item: (1 if item[2].feasible else 0, item[0]), reverse=True)
-        elite_count = max(1, min(len(scored), population_size // 2))
-        next_population: list[list[Case]] = [candidate for _, candidate, _ in scored[:elite_count]]
-
-        while len(next_population) < population_size:
-            parent = scored[rng.randrange(len(scored))][1]
-            mutated = parent[:]
-            for _ in range(max(1, len(mutated) // 8)):
-                idx_a, idx_b = rng.sample(range(len(mutated)), 2)
-                mutated[idx_a], mutated[idx_b] = mutated[idx_b], mutated[idx_a]
-            next_population.append(mutated)
-        population = next_population
-
-        for candidate in population:
-            score, result = _evaluate_case_order(pallet, candidate)
-            if result.feasible and score > best_score:
-                best_score = score
-                best_result = result
-
-    if best_result is not None and best_result.feasible:
-        return best_result
-
-    return solve_pallet_layout(pallet, expanded_cases, allow_overhang=False)
+    """Solve with the GA layer search enabled (kept for API compatibility)."""
+    return solve_pallet_layout(
+        pallet,
+        cases,
+        optimize=True,
+        optimization_generations=generations,
+        optimization_population=population_size,
+        optimization_seed=seed,
+    )
 
 
 def solve_pallet_layout(
@@ -729,15 +737,16 @@ def solve_pallet_layout(
     cases: Iterable[Case | dict[str, float | str | int]],
     *,
     allow_overhang: bool = False,
-    optimize: bool = False,
-    optimization_generations: int = 12,
-    optimization_population: int = 12,
-    optimization_seed: int = 0,
+    optimize: bool = True,
+    optimization_generations: int = DEFAULT_GA[0],
+    optimization_population: int = DEFAULT_GA[1],
+    optimization_seed: int = DEFAULT_GA[2],
 ) -> LayoutResult:
-    """Heuristic layered pallet-loading optimizer used as a practical baseline.
+    """Stack the given identical cases in flat layers on the pallet.
 
-    It supports both US and metric unit conventions and keeps the same public API while
-    allowing a range of standard pallet definitions such as CHEP and EUR pallets.
+    Each layer pattern comes from the block packer and, with ``optimize``, the GA layer search
+    (used wherever the block packer falls short of the malleable bound). Supports US and metric
+    units and the standard CHEP/GMA/EUR pallet definitions.
     """
 
     if not isinstance(pallet, Pallet):
@@ -784,20 +793,10 @@ def solve_pallet_layout(
             f"Combined plan-view footprint exceeds pallet plan area limit {pallet.max_plan_area:.3f}."
         )
 
-    # Load-level violations (weight, volume, area) can't be fixed by reordering, so only
-    # run the optimizer when they are clear; otherwise its result would hide them.
-    if optimize and not violations:
-        improved = optimize_layout(
-            pallet,
-            expanded_cases,
-            generations=optimization_generations,
-            population_size=optimization_population,
-            seed=optimization_seed,
-        )
-        if improved.feasible:
-            return improved
-
-    return _evaluate_load(pallet, expanded_cases, violations)
+    if not expanded_cases:
+        return LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases available to place."])
+    ga = (optimization_generations, optimization_population, optimization_seed) if optimize else None
+    return _evaluate_load(pallet, expanded_cases, violations, ga)
 
 
 build_layout = solve_pallet_layout

@@ -172,13 +172,28 @@ A sensible phased strategy is:
 4. Stacking logic: allow only legal stacks or columns and enforce stability checks.
 5. Metaheuristic improvement: run a GA or local-search improvement loop atop a feasible layout to reduce waste or improve placement symmetry.
 
-This repo implements steps 1–3 for a single repeated case type: an exact-geometry block packer for each layer, and flat layers stacked up to the max build height within the weight and other load limits. Steps 4 and 5 (interlocking or column rules, stability checks, and metaheuristic improvement) are still open.
+This repo implements steps 1–3 and part of step 5 for a single repeated case type:
+- an exact-geometry block packer for each layer,
+- a GA layer search that improves on it where it falls short of the bound,
+- flat layers stacked up to the max build height within the weight and other load limits.
+
+Step 4 (interlocking or column rules, and stability checks) is still open.
 
 ## Current solver behavior
 
 ### Layer pattern
 
-Each layer is built by a **block packer**. This is a recursive guillotine search over the deck: each region is either filled with a uniform grid of one case orientation or cut in two, and each half is solved the same way. It finds the classic block patterns. For example, 5×8 cases on a 40×48 deck give the full 48, where the original greedy packer managed 45. When the search space is very large (tiny cases on a big deck), it is limited to two-block patterns so it stays responsive.
+Two solvers can build a layer, and the solver keeps whichever layer holds more cases.
+
+**Block packer.** A recursive guillotine search over the deck: each region is either filled with a uniform grid of one case orientation or cut in two, and each half is solved the same way. It finds the classic block patterns. For example, 5×8 cases on a 40×48 deck give the full 48, where the original greedy packer managed 45. When the search space is very large (tiny cases on a big deck), it is limited to two-block patterns so it stays responsive.
+
+**GA layer search** (genetic algorithm). It starts from the **malleable bound**: how many cases would fit if they could be squeezed into any shape. For a whole pallet that's the space above the deck divided by the case volume. Because layers are flat and identical, this works out to `floor(deck area / case footprint)` per layer, which is the GA's target.
+- **Encoding:** a chromosome has one gene per case up to the target, and each gene picks that case's orientation.
+- **Decoding:** cases are placed in order at the bottom-left-most free spot, which can produce interlocking (non-guillotine) patterns that the block packer can't.
+- **Objective:** `placed − penalty × unplaced`, so the bound itself is the optimum.
+- **Search:** two-point crossover, point and block mutation, tournament selection and elitism. It stops early at the bound.
+- **When it runs:** only when the block packer falls short of the bound, the footprint isn't square, and the target is at most 150 cases per layer.
+- **Example:** for 9×7 cases on CHEP it finds 28 per layer, where the block packer finds 27 (the bound is 30). Defaults are 40 generations, population 24, seed 0, so results are reproducible.
 
 ### Layers and build height
 
@@ -191,18 +206,28 @@ Each layer is built by a **block packer**. This is a recursive guillotine search
 
 `max_weight` caps the total case weight, `max_volume` caps the total case volume, and `max_plan_area` caps the combined case footprint. `maximize_case_count` takes the smaller of layers × cases per layer and those caps. A run that breaks a limit is reported as infeasible, with a reason for each limit it breaks.
 
+### Solver log
+
+Every result records what each solver did in `LayoutResult.solver_runs`, a list of `SolverRun` entries:
+- solver name, layer family (e.g. "8 in tall layers"), cases per layer and the bound,
+- whether the solver ran or was skipped (with the reason), and whether its layer was used,
+- for the GA, a `(generation, best objective, mean objective)` history.
+
 ### API
 
 - `Case`: dimensions, weight, quantity, unit, and `this_side_up`.
 - `Pallet`: deck length and width, `height` (max build height including the deck), `deck_height`, unit, and optional `max_weight`, `max_volume` and `max_plan_area`. `Pallet.from_standard(name, unit=..., max_build_height=...)` loads the CHEP, GMA, EUR_1200X800 and EUR_1000X1200 presets, and "EURO" is an alias for EUR_1200X800. Preset max weights are in lb for CHEP/GMA and kg for EUR. `Pallet` doesn't store a weight unit, so case weights must use the same unit.
-- `solve_pallet_layout(pallet, cases)`: places the given cases and returns a `LayoutResult`.
-- `maximize_case_count(pallet, case)`: returns the largest count that fits, with its `LayoutResult`.
+- `solve_pallet_layout(pallet, cases, optimize=True, optimization_generations=40, optimization_population=24, optimization_seed=0)`: places the given cases and returns a `LayoutResult`. Pass `optimize=False` to use the block packer only.
+- `maximize_case_count(pallet, case, optimize=True, ...)`: returns the largest count that fits, with its `LayoutResult`. It takes the same GA options.
+- `optimize_layout(pallet, cases, generations=..., population_size=..., seed=...)`: shorthand for `solve_pallet_layout` with the GA on.
 - `LayoutResult` contains:
   - `placements`: x, y, z, size and orientation for each case, with z measured from the top of the deck.
   - `feasible` and `violations`.
   - `layers`, `cases_per_layer` and `max_layers`. Capacity is `max_layers × cases_per_layer`.
   - `utilization`: deck coverage of the base layer.
   - `volume_utilization`: case volume as a share of the space above the deck.
+  - `volume_bound`: the malleable bound for the whole pallet.
+  - `solver_runs`: the solver log.
   - `total_weight`.
 
 Example:
@@ -228,32 +253,33 @@ Run it with:
 uv run streamlit run app.py
 ```
 
-The app re-solves whenever an input changes. Every input that affects the solve is in the sidebar:
+The app finds the most cases that fit and re-solves whenever an input changes. Every input that affects the solve is in the sidebar, with each label and value on one line:
 
+- **Units**: one system for every length and weight, either US (in, lb) or Metric (cm, kg). Switching converts every value already entered.
 - **Pallet**:
-  - Preset (CHEP, GMA, EUR 1200×800, EUR 1000×1200) or custom dimensions.
-  - Length and weight units. Changing a unit converts the values already entered.
+  - Preset (CHEP, GMA, EUR 1200×800, EUR 1000×1200, converted to the active units) or custom dimensions.
   - Max build height (including the pallet), deck height and max weight.
   - Max volume and max plan area, under "More limits".
-  - Choosing a preset fills in typical values (60" or 1800 mm build height). Editing a pallet dimension switches the preset to "Custom". A limit of 0 means no limit.
-- **Case**: length, width, height, weight and unit, plus *This side up*.
-- **Solve**:
-  - *Max cases* stacks as many full, flat layers as fit within the limits.
-  - *Fixed quantity* places a given number of cases and reports any that don't fit.
+  - Choosing a preset fills in a typical build height (60 in or 180 cm). Editing a pallet dimension switches the preset to "Custom". A limit of 0 means no limit.
+- **Case**: length, width, height and weight, plus *This side up*.
+- **Solve**: the GA layer search switch, with its generations, population and seed.
 
 The results area shows:
 
 - **Headline**: the case count and layer breakdown, e.g. "96 cases fit · 6 layers × 16".
-- **3D view**: an interactive Plotly model of the built pallet. Drag to spin, scroll to zoom, right-drag to pan, and use the Iso, Front, Side and Top buttons to reset the viewpoint. The deck is brown, layers alternate shades, and red dashes mark the max build height. Loads over 6,000 cases are drawn as one block per layer.
+- **3D view**: an interactive Plotly model of the built pallet. Drag to spin (turntable rotation, so the pallet stays upright), scroll to zoom, and use the Iso, Front, Side and Top buttons to reset the viewpoint. The orbital-rotation and pan tools are removed. The deck is brown, layers alternate shades, and red dashes mark the max build height. Loads over 6,000 cases are drawn as one block per layer.
 - **Layer plan**: a 2D view of the layer pattern. Rotated cases are highlighted.
-- **Metrics**: status, cases, layers, cube use, deck coverage, load weight, build height (deck + load) and headroom.
+- **Metrics**: cases, malleable bound, layers, cube use, deck coverage, load weight, build height (deck + load) and headroom.
 - **Limit**: what stops the count going higher (pallet space, max weight, max volume or max plan area), or why a run is infeasible.
+- **Solver status**:
+  - A table of every solver run: layer family, cases per layer, the bound, whether it was used, and notes (for example why the GA was skipped).
+  - When the GA runs, a chart of its best and mean objective per generation, with the bound (the optimum) and the block packer's score as reference lines.
 - **Tabs**: a placement table (layer and x/y/z for each case) and a JSON export of every input and the full layout.
 
 ## Recommendations for future versions
 
 - **Interlocking layers**: alternate the pattern between layers (column vs. interlocked stacking) for load stability.
-- **Better patterns**: non-guillotine layer patterns (for example pinwheels) for awkward case sizes, where the block packer can fall short of the area bound.
+- **Exact layer bounds**: the GA narrows the gap to the malleable bound but can't prove optimality. An exact 2D solver (for example CP-SAT) could certify the best layer for awkward case sizes.
 - **Stability checks**: center-of-gravity and load-distribution checks, and a per-case crush or max-stack-weight limit.
 - **Weighted objective**: tunable coefficients to trade density against stability.
 - **Mixed loads**: support for more than one case type per pallet.
@@ -261,4 +287,4 @@ The results area shows:
 
 ## Summary
 
-This is a real-world rectangular packing problem with strong operational constraints. The project deliberately handles one case type per pallet run, which keeps the model easy to reason about, validate and present. Within that scope, it packs each layer exactly with block patterns, stacks flat layers to the max build height, respects weight, volume and area limits, explains what limits each result, and shows the built pallet in an interactive 3D view.
+This is a real-world rectangular packing problem with strong operational constraints. The project deliberately handles one case type per pallet run, which keeps the model easy to reason about, validate and present. Within that scope, it packs each layer with block patterns, improves on them with a GA that targets the malleable bound, stacks flat layers to the max build height, respects weight, volume and area limits, explains what limits each result and which solver produced it, and shows the built pallet in an interactive 3D view.

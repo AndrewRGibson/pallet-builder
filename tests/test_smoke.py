@@ -294,7 +294,8 @@ def test_layers_never_overlap_or_leave_the_deck_across_case_sizes():
     chep = Pallet.from_standard("CHEP")
     for length in range(3, 20, 2):
         for width in range(3, length + 1, 2):
-            count, result = maximize_case_count(chep, Case("S", length, width, 5))
+            # Block packer geometry only; the GA has its own tests below.
+            count, result = maximize_case_count(chep, Case("S", length, width, 5), optimize=False)
             assert count == len(result.placements)
             _assert_valid_layer(chep, result.placements)
 
@@ -373,3 +374,50 @@ def test_build_height_must_exceed_deck_height():
 
     with pytest.raises(ValueError, match="deck height"):
         Pallet.from_standard("CHEP", unit="in", max_build_height=6)
+
+
+def test_ga_beats_block_packer_with_interlocking_layer():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    case = Case("G", 9, 7, 6)
+
+    block_count, block = maximize_case_count(chep, case, optimize=False)
+    ga_count, ga = maximize_case_count(chep, case)
+
+    assert block.cases_per_layer == 27
+    assert ga.cases_per_layer == 28
+    assert ga_count == 28 * ga.max_layers > block_count
+    _assert_valid_load(chep, ga.placements)
+
+    runs = {run.solver: run for run in ga.solver_runs}
+    assert runs["Genetic algorithm"].selected and not runs["Block packer"].selected
+    assert runs["Genetic algorithm"].target == 30  # malleable bound: 1920 / 63 per layer
+    best = [entry[1] for entry in runs["Genetic algorithm"].history]
+    assert best == sorted(best)  # elitism: the best objective never gets worse
+    assert all(entry[2] <= entry[1] for entry in runs["Genetic algorithm"].history)
+
+
+def test_ga_reaches_the_bound_and_stops_early():
+    chep = Pallet.from_standard("CHEP", unit="in")
+    _, result = maximize_case_count(chep, Case("G", 19, 7, 6))
+    run = next(run for run in result.solver_runs if run.solver == "Genetic algorithm")
+
+    assert run.cases_per_layer == run.target == 14
+    assert run.history[-1][1] == 14  # objective = placed - unplaced, so the optimum is the bound
+    assert len(run.history) - 1 < 40
+
+
+def test_ga_is_skipped_when_block_packer_hits_the_bound():
+    chep = Pallet.from_standard("CHEP", unit="in")
+    _, result = maximize_case_count(chep, Case("B", 8, 5, 5))
+    runs = {run.solver: run for run in result.solver_runs}
+
+    assert runs["Block packer"].selected and runs["Block packer"].cases_per_layer == 48
+    assert not runs["Genetic algorithm"].ran
+    assert "already reaches the bound" in runs["Genetic algorithm"].note
+
+
+def test_volume_bound_assumes_malleable_cases():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    _, result = maximize_case_count(chep, Case("V", 12, 10, 8))
+
+    assert result.volume_bound == int(40 * 48 * 54 // (12 * 10 * 8))  # 108
