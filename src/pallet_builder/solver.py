@@ -1,0 +1,687 @@
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass, field
+from itertools import permutations
+from typing import Iterable, Sequence
+
+
+_UNIT_TO_METERS = {
+    "mm": 0.001,
+    "cm": 0.01,
+    "m": 1.0,
+    "in": 0.0254,
+    "inch": 0.0254,
+    "inches": 0.0254,
+    "ft": 0.3048,
+    "foot": 0.3048,
+    "feet": 0.3048,
+    "yd": 0.9144,
+    "yard": 0.9144,
+}
+
+_STANDARD_PALLETS = {
+    "CHEP": {"length": 40, "width": 48, "height": 6, "max_weight": 2200, "unit": "in"},
+    "GMA": {"length": 40, "width": 48, "height": 6, "max_weight": 2200, "unit": "in"},
+    "EUR_1200X800": {"length": 1200, "width": 800, "height": 144, "max_weight": 1500, "unit": "mm"},
+    "EUR_1200x800": {"length": 1200, "width": 800, "height": 144, "max_weight": 1500, "unit": "mm"},
+    "EUR_1000X1200": {"length": 1000, "width": 1200, "height": 144, "max_weight": 1500, "unit": "mm"},
+    "EUR_1000x1200": {"length": 1000, "width": 1200, "height": 144, "max_weight": 1500, "unit": "mm"},
+    "EURO": {"length": 1200, "width": 800, "height": 144, "max_weight": 1500, "unit": "mm"},
+}
+STANDARD_PALLETS = _STANDARD_PALLETS
+
+
+def normalize_unit(unit: str) -> str:
+    if unit is None:
+        raise ValueError("Unit is required.")
+    normalized = str(unit).strip().lower().replace(" ", "")
+    aliases = {
+        "mm": "mm",
+        "millimeter": "mm",
+        "millimetre": "mm",
+        "centimeter": "cm",
+        "centimetre": "cm",
+        "cm": "cm",
+        "meter": "m",
+        "metre": "m",
+        "m": "m",
+        "in": "in",
+        "inch": "in",
+        "inches": "in",
+        "ft": "ft",
+        "foot": "ft",
+        "feet": "ft",
+        "yd": "yd",
+        "yard": "yd",
+    }
+    if normalized not in aliases:
+        raise ValueError(f"Unsupported unit {unit!r}.")
+    return aliases[normalized]
+
+
+def convert_length(value: float, from_unit: str, to_unit: str) -> float:
+    from_unit = normalize_unit(from_unit)
+    to_unit = normalize_unit(to_unit)
+    if from_unit == to_unit:
+        return float(value)
+    value_in_meters = float(value) * _UNIT_TO_METERS[from_unit]
+    return value_in_meters / _UNIT_TO_METERS[to_unit]
+
+
+@dataclass(frozen=True)
+class Case:
+    """Represents a case with a fixed box geometry and optional unit metadata."""
+
+    name: str
+    length: float
+    width: float
+    height: float
+    weight: float = 0.0
+    quantity: int = 1
+    unit: str = "in"
+
+    def __post_init__(self) -> None:
+        if self.length <= 0 or self.width <= 0 or self.height <= 0:
+            raise ValueError(f"Case dimensions for {self.name!r} must all be positive.")
+        if self.quantity <= 0:
+            raise ValueError(f"Case quantity for {self.name!r} must be positive.")
+        if self.weight < 0:
+            raise ValueError(f"Case weight for {self.name!r} cannot be negative.")
+        normalize_unit(self.unit)
+
+    @property
+    def volume(self) -> float:
+        return self.length * self.width * self.height
+
+    @property
+    def footprint_area(self) -> float:
+        return self.length * self.width
+
+    def oriented_dimensions(self, orientation: tuple[int, int, int]) -> tuple[float, float, float]:
+        axes = [self.length, self.width, self.height]
+        return tuple(axes[i] for i in orientation)
+
+
+@dataclass
+class Pallet:
+    """Physical pallet envelope and operational constraints."""
+
+    length: float
+    width: float
+    height: float | None = None
+    unit: str = "in"
+    max_weight: float | None = None
+    max_volume: float | None = None
+    max_plan_area: float | None = None
+    name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.length <= 0 or self.width <= 0:
+            raise ValueError("Pallet length and width must be positive.")
+        if self.height is not None and self.height <= 0:
+            raise ValueError("Pallet height must be positive when provided.")
+        normalize_unit(self.unit)
+
+    @classmethod
+    def from_standard(cls, name: str, *, unit: str = "in") -> "Pallet":
+        key = str(name).upper()
+        if key not in _STANDARD_PALLETS:
+            available = ", ".join(sorted(_STANDARD_PALLETS))
+            raise ValueError(f"Unknown standard pallet {name!r}. Available: {available}")
+        spec = _STANDARD_PALLETS[key]
+        length = convert_length(float(spec["length"]), spec["unit"], unit)
+        width = convert_length(float(spec["width"]), spec["unit"], unit)
+        height = convert_length(float(spec["height"]), spec["unit"], unit)
+        max_weight = float(spec["max_weight"])
+        return cls(
+            length=length,
+            width=width,
+            height=height,
+            unit=unit,
+            max_weight=max_weight,
+            name=name,
+        )
+
+    @property
+    def plan_area(self) -> float:
+        return self.length * self.width
+
+
+@dataclass
+class Placement:
+    case_name: str
+    x: float
+    y: float
+    z: float
+    length: float
+    width: float
+    height: float
+    orientation: tuple[int, int, int]
+
+
+@dataclass
+class LayoutResult:
+    placements: list[Placement]
+    total_weight: float
+    utilization: float
+    overhang: float
+    underhang: float
+    feasible: bool
+    violations: list[str] = field(default_factory=list)
+
+
+def _orientations_for(case: Case) -> list[tuple[int, int, int]]:
+    orientations: set[tuple[int, int, int]] = set()
+    for perm in set(permutations(range(3))):
+        dims = case.oriented_dimensions(perm)
+        if dims[0] > 0 and dims[1] > 0 and dims[2] > 0:
+            orientations.add(perm)
+    return sorted(orientations)
+
+
+def _expand_case_quantities(cases: Iterable[Case]) -> list[Case]:
+    expanded: list[Case] = []
+    for case in cases:
+        for index in range(case.quantity):
+            expanded.append(
+                Case(
+                    name=f"{case.name}-{index + 1}",
+                    length=case.length,
+                    width=case.width,
+                    height=case.height,
+                    weight=case.weight,
+                    quantity=1,
+                    unit=case.unit,
+                )
+            )
+    return expanded
+
+
+def _split_free_rectangles(
+    free_rectangles: list[tuple[float, float, float, float]],
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+) -> list[tuple[float, float, float, float]]:
+    updated: list[tuple[float, float, float, float]] = []
+    for rect_x, rect_y, rect_w, rect_h in free_rectangles:
+        if x >= rect_x + rect_w or x + width <= rect_x or y >= rect_y + rect_h or y + height <= rect_y:
+            updated.append((rect_x, rect_y, rect_w, rect_h))
+            continue
+
+        if x > rect_x:
+            updated.append((rect_x, rect_y, x - rect_x, rect_h))
+        if x + width < rect_x + rect_w:
+            updated.append((x + width, rect_y, rect_x + rect_w - (x + width), rect_h))
+        if y > rect_y:
+            updated.append((rect_x, rect_y, rect_w, y - rect_y))
+        if y + height < rect_y + rect_h:
+            updated.append((rect_x, y + height, rect_w, rect_y + rect_h - (y + height)))
+
+    deduped: list[tuple[float, float, float, float]] = []
+    for candidate in sorted(updated, key=lambda item: (item[2] * item[3], item[0], item[1])):
+        if candidate[2] > 1e-9 and candidate[3] > 1e-9 and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def _candidate_positions(
+    case: Case,
+    free_rectangles: Sequence[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float, tuple[int, int, int]]]:
+    positions: list[tuple[float, float, float, float, tuple[int, int, int]]] = []
+    for orientation in _orientations_for(case):
+        length, width, _ = case.oriented_dimensions(orientation)
+        for rect_x, rect_y, rect_w, rect_h in free_rectangles:
+            if length <= rect_w and width <= rect_h:
+                waste = (rect_w * rect_h) - (length * width)
+                positions.append((rect_x, rect_y, length, width, orientation))
+    positions.sort(key=lambda item: (item[2] * item[3], item[0], item[1]))
+    return positions
+
+
+def _pack_layer(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
+    free_rectangles: list[tuple[float, float, float, float]] = [(0.0, 0.0, pallet.length, pallet.width)]
+    placements: list[Placement] = []
+    used_area = 0.0
+    violations: list[str] = []
+
+    for case in sorted(cases, key=lambda item: (item.length * item.width, max(item.length, item.width), item.height), reverse=True):
+        candidate: tuple[float, float, float, float, tuple[int, int, int]] | None = None
+        for position in _candidate_positions(case, free_rectangles):
+            x, y, length, width, orientation = position
+            waste = (pallet.length * pallet.width) - (length * width)
+            if candidate is None or (length * width) > (candidate[2] * candidate[3]):
+                candidate = (x, y, length, width, orientation)
+        if candidate is None:
+            violations.append(f"No feasible footprint for case {case.name!r} on the pallet.")
+            continue
+
+        x, y, length, width, orientation = candidate
+        placements.append(
+            Placement(
+                case_name=case.name,
+                x=x,
+                y=y,
+                z=0.0,
+                length=length,
+                width=width,
+                height=case.height,
+                orientation=orientation,
+            )
+        )
+        used_area += length * width
+        free_rectangles = _split_free_rectangles(free_rectangles, x, y, length, width)
+
+    if not placements:
+        return [], 0.0, ["No cases could be placed on the pallet."]
+
+    return placements, used_area / pallet.plan_area, violations
+
+
+def _score_layout_result(pallet: Pallet, result: LayoutResult) -> float:
+    if not result.feasible:
+        return -1_000_000.0 - 100.0 * len(result.violations) - 0.001 * result.overhang - 0.001 * result.underhang
+    score = result.utilization
+    score -= 0.001 * result.overhang
+    score -= 0.001 * result.underhang
+    return score
+
+
+def maximize_case_count(
+    pallet: Pallet,
+    case: Case | dict[str, float | str | int],
+    *,
+    progress_callback: callable | None = None,
+) -> tuple[int, LayoutResult]:
+    """Return the maximum number of identical cases that fit on a pallet.
+
+    The function uses a binary search over the feasible count and returns both the count and the
+    final layout that achieves that maximum. A progress callback may be passed to report iteration
+    progress during the search.
+    """
+
+    if isinstance(case, dict):
+        unit = str(case.get("unit", pallet.unit))
+        case = Case(
+            name=str(case["name"]),
+            length=float(case["length"]),
+            width=float(case["width"]),
+            height=float(case["height"]),
+            weight=float(case.get("weight", 0.0)),
+            quantity=int(case.get("quantity", 1)),
+            unit=unit,
+        )
+
+    if case.unit != pallet.unit:
+        case = Case(
+            name=case.name,
+            length=convert_length(case.length, case.unit, pallet.unit),
+            width=convert_length(case.width, case.unit, pallet.unit),
+            height=convert_length(case.height, case.unit, pallet.unit),
+            weight=case.weight,
+            quantity=case.quantity,
+            unit=pallet.unit,
+        )
+
+    if case.length > pallet.length or case.width > pallet.width:
+        return 0, LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["Case footprint exceeds pallet footprint."])
+
+    upper_bound = max(1, int((pallet.length / case.length) * (pallet.width / case.width)))
+    if pallet.max_weight is not None and case.weight > 0:
+        upper_bound = min(upper_bound, int(pallet.max_weight // case.weight))
+    if pallet.max_plan_area is not None and case.footprint_area > 0:
+        upper_bound = min(upper_bound, int(pallet.max_plan_area // case.footprint_area))
+    if pallet.max_volume is not None and case.volume > 0:
+        upper_bound = min(upper_bound, int(pallet.max_volume // case.volume))
+
+    lower_bound = 0
+    best_count = 0
+    best_result = LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases fit."])
+    iterations = 0
+
+    while lower_bound <= upper_bound:
+        iterations += 1
+        mid = (lower_bound + upper_bound) // 2
+        candidate = Case(
+            name=case.name,
+            length=case.length,
+            width=case.width,
+            height=case.height,
+            weight=case.weight,
+            quantity=mid,
+            unit=case.unit,
+        )
+        result = solve_pallet_layout(pallet, [candidate])
+
+        if progress_callback is not None:
+            progress_callback(iterations, lower_bound, upper_bound, mid, result)
+
+        if result.feasible and len(result.placements) == mid:
+            best_count = mid
+            best_result = result
+            lower_bound = mid + 1
+        else:
+            upper_bound = mid - 1
+
+    if best_count == 0:
+        return 0, LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases fit on this pallet."])
+
+    return best_count, best_result
+
+
+def _single_case_type(cases: Sequence[Case]) -> bool:
+    if not cases:
+        return True
+    signature = (cases[0].length, cases[0].width, cases[0].height)
+    return all((case.length, case.width, case.height) == signature for case in cases[1:])
+
+
+def _evaluate_case_order(
+    pallet: Pallet,
+    cases: Sequence[Case],
+) -> tuple[float, LayoutResult]:
+    placements, utilization, packing_violations = _pack_layer(pallet, cases)
+    violations: list[str] = list(packing_violations)
+
+    overhang = 0.0
+    for placement in placements:
+        if placement.x + placement.length > pallet.length + 1e-9:
+            overhang += placement.x + placement.length - pallet.length
+        if placement.y + placement.width > pallet.width + 1e-9:
+            overhang += placement.y + placement.width - pallet.width
+    underhang = max(0.0, pallet.plan_area - sum(placement.length * placement.width for placement in placements))
+
+    if pallet.height is not None:
+        max_z = max((placement.z + placement.height for placement in placements), default=0.0)
+        if max_z > pallet.height:
+            violations.append(f"Case stacking exceeds pallet height {pallet.height:.3f} with max z {max_z:.3f}.")
+
+    feasible = not violations and len(placements) == len(cases)
+    result = LayoutResult(
+        placements=placements,
+        total_weight=sum(case.weight for case in cases),
+        utilization=utilization,
+        overhang=overhang,
+        underhang=underhang,
+        feasible=feasible,
+        violations=violations,
+    )
+    return _score_layout_result(pallet, result), result
+
+
+def optimize_layout(
+    pallet: Pallet,
+    cases: Iterable[Case | dict[str, float | str | int]],
+    *,
+    generations: int = 12,
+    population_size: int = 12,
+    seed: int = 0,
+) -> LayoutResult:
+    """GA-style improvement stage on top of the baseline greedy packer.
+
+    The optimizer keeps the original greedy order as a baseline candidate and explores a small
+    population of alternative case orders and placement priorities to select the best feasible
+    layout by utilization and penalty score.
+    """
+
+    rng = random.Random(seed)
+    normalized_cases: list[Case] = []
+    for item in cases:
+        if isinstance(item, Case):
+            case = item
+            if case.unit != pallet.unit:
+                case = Case(
+                    name=case.name,
+                    length=convert_length(case.length, case.unit, pallet.unit),
+                    width=convert_length(case.width, case.unit, pallet.unit),
+                    height=convert_length(case.height, case.unit, pallet.unit),
+                    weight=case.weight,
+                    quantity=case.quantity,
+                    unit=pallet.unit,
+                )
+            normalized_cases.append(case)
+        else:
+            unit = str(item.get("unit", pallet.unit))
+            normalized_cases.append(
+                Case(
+                    name=str(item["name"]),
+                    length=float(item["length"]),
+                    width=float(item["width"]),
+                    height=float(item["height"]),
+                    weight=float(item.get("weight", 0.0)),
+                    quantity=int(item.get("quantity", 1)),
+                    unit=unit,
+                )
+            )
+
+    expanded_cases = _expand_case_quantities(normalized_cases)
+    if not expanded_cases:
+        return LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases available to place."])
+
+    if not _single_case_type(expanded_cases):
+        total_weight = sum(case.weight for case in expanded_cases)
+        return LayoutResult(
+            placements=[],
+            total_weight=total_weight,
+            utilization=0.0,
+            overhang=0.0,
+            underhang=0.0,
+            feasible=False,
+            violations=["This solver supports a single case type per pallet for now."],
+        )
+
+    baseline_order = expanded_cases[:]
+    _, baseline_result = _evaluate_case_order(pallet, baseline_order)
+    if baseline_result.feasible:
+        return baseline_result
+
+    population: list[list[Case]] = [
+        baseline_order[:],
+        sorted(expanded_cases, key=lambda case: (case.length * case.width, max(case.length, case.width), case.height)),
+        sorted(expanded_cases, key=lambda case: (max(case.length, case.width), case.length * case.width, case.height), reverse=True),
+        sorted(expanded_cases, key=lambda case: (case.weight, case.length * case.width), reverse=True),
+    ]
+
+    for _ in range(max(1, population_size - len(population))):
+        shuffled = expanded_cases[:]
+        rng.shuffle(shuffled)
+        population.append(shuffled)
+
+    best_result: LayoutResult | None = baseline_result
+    best_score = _score_layout_result(pallet, baseline_result)
+    for _ in range(generations):
+        scored = []
+        for candidate in population:
+            score, result = _evaluate_case_order(pallet, candidate)
+            scored.append((score, candidate, result))
+        scored.sort(key=lambda item: (1 if item[2].feasible else 0, item[0]), reverse=True)
+        elite_count = max(1, min(len(scored), population_size // 2))
+        next_population: list[list[Case]] = [candidate for _, candidate, _ in scored[:elite_count]]
+
+        while len(next_population) < population_size:
+            parent = scored[rng.randrange(len(scored))][1]
+            mutated = parent[:]
+            for _ in range(max(1, len(mutated) // 8)):
+                idx_a, idx_b = rng.sample(range(len(mutated)), 2)
+                mutated[idx_a], mutated[idx_b] = mutated[idx_b], mutated[idx_a]
+            next_population.append(mutated)
+        population = next_population
+
+        for candidate in population:
+            score, result = _evaluate_case_order(pallet, candidate)
+            if result.feasible and score > best_score:
+                best_score = score
+                best_result = result
+
+    if best_result is not None and best_result.feasible:
+        return best_result
+
+    return solve_pallet_layout(pallet, expanded_cases, allow_overhang=False)
+
+
+def solve_pallet_layout(
+    pallet: Pallet,
+    cases: Iterable[Case | dict[str, float | str | int]],
+    *,
+    allow_overhang: bool = False,
+    optimize: bool = False,
+    optimization_generations: int = 12,
+    optimization_population: int = 12,
+) -> LayoutResult:
+    """Heuristic layered pallet-loading optimizer used as a practical baseline.
+
+    It supports both US and metric unit conventions and keeps the same public API while
+    allowing a range of standard pallet definitions such as CHEP and EUR pallets.
+    """
+
+    if not isinstance(pallet, Pallet):
+        pallet = Pallet(
+            length=float(pallet["length"]),
+            width=float(pallet["width"]),
+            height=float(pallet["height"]) if pallet.get("height") is not None else None,
+            unit=str(pallet.get("unit", "in")),
+            max_weight=float(pallet.get("max_weight", 0.0)) if pallet.get("max_weight") is not None else None,
+            max_volume=float(pallet.get("max_volume")) if pallet.get("max_volume") is not None else None,
+            max_plan_area=float(pallet.get("max_plan_area")) if pallet.get("max_plan_area") is not None else None,
+            name=str(pallet.get("name")) if pallet.get("name") is not None else None,
+        )
+
+    normalized_cases: list[Case] = []
+    for item in cases:
+        if isinstance(item, Case):
+            case = item
+            if case.unit != pallet.unit:
+                case = Case(
+                    name=case.name,
+                    length=convert_length(case.length, case.unit, pallet.unit),
+                    width=convert_length(case.width, case.unit, pallet.unit),
+                    height=convert_length(case.height, case.unit, pallet.unit),
+                    weight=case.weight,
+                    quantity=case.quantity,
+                    unit=pallet.unit,
+                )
+            normalized_cases.append(case)
+        else:
+            unit = str(item.get("unit", pallet.unit))
+            normalized_cases.append(
+                Case(
+                    name=str(item["name"]),
+                    length=float(item["length"]),
+                    width=float(item["width"]),
+                    height=float(item["height"]),
+                    weight=float(item.get("weight", 0.0)),
+                    quantity=int(item.get("quantity", 1)),
+                    unit=unit,
+                )
+            )
+
+    for idx, case in enumerate(normalized_cases):
+        if case.unit != pallet.unit:
+            normalized_cases[idx] = Case(
+                name=case.name,
+                length=convert_length(case.length, case.unit, pallet.unit),
+                width=convert_length(case.width, case.unit, pallet.unit),
+                height=convert_length(case.height, case.unit, pallet.unit),
+                weight=case.weight,
+                quantity=case.quantity,
+                unit=pallet.unit,
+            )
+
+    expanded_cases = _expand_case_quantities(normalized_cases)
+    total_weight = sum(case.weight for case in expanded_cases)
+    total_volume = sum(case.volume for case in expanded_cases)
+
+    violations: list[str] = []
+    if not _single_case_type(expanded_cases):
+        violations.append("This solver supports a single case type per pallet for now.")
+        return LayoutResult(
+            placements=[],
+            total_weight=total_weight,
+            utilization=0.0,
+            overhang=0.0,
+            underhang=0.0,
+            feasible=False,
+            violations=violations,
+        )
+    if pallet.max_weight is not None and total_weight > pallet.max_weight:
+        violations.append(
+            f"Total case weight {total_weight:.3f} exceeds pallet max weight {pallet.max_weight:.3f}."
+        )
+    if pallet.max_volume is not None and total_volume > pallet.max_volume:
+        violations.append(
+            f"Total case volume {total_volume:.3f} exceeds pallet max volume {pallet.max_volume:.3f}."
+        )
+    if pallet.max_plan_area is not None and sum(case.length * case.width for case in expanded_cases) > pallet.max_plan_area:
+        violations.append(
+            f"Combined plan-view footprint exceeds pallet plan area limit {pallet.max_plan_area:.3f}."
+        )
+
+    if optimize:
+        improved = optimize_layout(
+            pallet,
+            expanded_cases,
+            generations=optimization_generations,
+            population_size=optimization_population,
+        )
+        if improved.feasible:
+            return improved
+
+    placements, utilization, packing_violations = _pack_layer(pallet, expanded_cases)
+    violations.extend(packing_violations)
+
+    overhang = 0.0
+    for placement in placements:
+        if placement.x + placement.length > pallet.length + 1e-9:
+            overhang += placement.x + placement.length - pallet.length
+        if placement.y + placement.width > pallet.width + 1e-9:
+            overhang += placement.y + placement.width - pallet.width
+    underhang = max(0.0, pallet.plan_area - sum(placement.length * placement.width for placement in placements))
+
+    if pallet.height is not None:
+        max_z = max((placement.z + placement.height for placement in placements), default=0.0)
+        if max_z > pallet.height:
+            violations.append(f"Case stacking exceeds pallet height {pallet.height:.3f} with max z {max_z:.3f}.")
+
+    feasible = not violations and len(placements) == len(expanded_cases)
+    return LayoutResult(
+        placements=placements,
+        total_weight=total_weight,
+        utilization=utilization,
+        overhang=overhang,
+        underhang=underhang,
+        feasible=feasible,
+        violations=violations,
+    )
+
+
+build_layout = solve_pallet_layout
+generate_layout = solve_pallet_layout
+
+
+def main() -> None:
+    pallet = Pallet.from_standard("CHEP", unit="in")
+    cases = [Case(f"A{i}", 2, 2, 2, weight=1, unit="in") for i in range(15)]
+    result = solve_pallet_layout(pallet, cases)
+    print(
+        {
+            "feasible": result.feasible,
+            "utilization": round(result.utilization, 4),
+            "total_weight": round(result.total_weight, 2),
+            "placements": [
+                {
+                    "case": placement.case_name,
+                    "x": placement.x,
+                    "y": placement.y,
+                    "z": placement.z,
+                    "length": placement.length,
+                    "width": placement.width,
+                    "height": placement.height,
+                }
+                for placement in result.placements
+            ],
+            "violations": result.violations,
+        }
+    )
