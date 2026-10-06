@@ -2,6 +2,16 @@
 
 This project is a practical starting point for a pallet-loading optimizer. For this phase, each run is intentionally scoped to stacking a single case type on a pallet: one SKU, one fixed case dimension set, repeated as many times as needed to fill the pallet.
 
+## Quick start
+
+```bash
+uv sync                          # install dependencies
+uv run streamlit run app.py      # open the planner UI (3D view, layer plan, export)
+uv run pytest                    # run the test suite
+```
+
+The solver packs each layer with exact block patterns and stacks flat layers up to the max build height, including the pallet deck. See [Current solver behavior](#current-solver-behavior) and [Streamlit UI](#streamlit-ui) for details.
+
 ## Problem framing
 
 A pallet build is effectively a constrained packing problem. In its simplest form it is a 2D rectangular packing problem on the pallet footprint, with a 3D extension once stacking height, stability, and load limits are included. Because this version is intentionally single-case, the optimization problem is narrowed to arranging repeated copies of the same case type efficiently while respecting physical, operational, and safety constraints.
@@ -160,66 +170,55 @@ A sensible phased strategy is:
 4. Stacking logic: allow only legal stacks or columns and enforce stability checks.
 5. Metaheuristic improvement: run a GA or local-search improvement loop atop a feasible layout to reduce waste or improve placement symmetry.
 
-This repo implements the first two steps of that roadmap: a deterministic single-layer packer for a fixed pallet footprint and a single repeated case type. That gives a quick, explainable baseline for one-case pallet runs and keeps the project tightly aligned with the current scope.
+This repo implements steps 1–3 for a single repeated case type: an exact-geometry block packer for each layer, and flat layers stacked up to the max build height within the weight and other load limits. Steps 4 and 5 (interlocking or column rules, stability checks, and metaheuristic improvement) are still open.
 
 ## Current solver behavior
 
-The solver packs a single layer of one case type:
+### Layer pattern
 
-- It first runs a **block packer**. This is a recursive guillotine search: each region is either filled with a uniform grid of one case orientation or cut in two, and each half is solved the same way. This finds the classic block patterns. For example, 5×8 cases on a 40×48 deck give the full 48.
-- For loads of up to 400 cases, a greedy packer runs as a fallback, and the solver keeps whichever layout places more.
-- Cases marked *this side up* (the default) only rotate flat on the deck. Set `this_side_up=False` to let the solver tip them, and it then prefers orientations under the height limit.
+Each layer is built by a **block packer**. This is a recursive guillotine search over the deck: each region is either filled with a uniform grid of one case orientation or cut in two, and each half is solved the same way. It finds the classic block patterns. For example, 5×8 cases on a 40×48 deck give the full 48, where the original greedy packer managed 45. When the search space is very large (tiny cases on a big deck), it is limited to two-block patterns so it stays responsive.
 
-The package exposes:
+### Layers and build height
+
+- `Pallet.height` is the **max build height measured from the floor, including the pallet**. The space for cases is `height − deck_height`. For example, a 60" build on a 6" CHEP deck leaves 54".
+- **Every layer has a flat top.** All cases in a layer share the same upright dimension, so the number of layers is `floor((max build height − deck height) / layer height)`. Every full layer uses the same pattern. A partial top layer, which happens when the weight limit or quantity runs out first, fills from case 1 outward.
+- Cases marked *this side up* (the default) only rotate flat on the deck. With `this_side_up=False`, the solver tries each dimension as the upright one and keeps the option that stacks the most cases in total. Ties go to more cases per layer, for a wider base.
+- With `height=None`, there is no build limit and the solver builds a single layer.
+
+### Limits
+
+`max_weight` caps the total case weight, `max_volume` caps the total case volume, and `max_plan_area` caps the combined case footprint. `maximize_case_count` takes the smaller of layers × cases per layer and those caps. A run that breaks a limit is reported as infeasible, with a reason for each limit it breaks.
+
+### API
 
 - `Case`: dimensions, weight, quantity, unit, and `this_side_up`.
-- `Pallet`: the deck footprint, `height` (max load height above the deck; `None` means no limit), `deck_height` (the pallet's own height, for reference only), and optional `max_weight`, `max_volume` and `max_plan_area`. Use `Pallet.from_standard("CHEP" | "GMA" | "EUR_1200X800" | "EUR_1000X1200", unit=..., max_load_height=...)` for standard pallets.
-- `solve_pallet_layout(pallet, cases, optimize=False, ...)`: places the given cases and returns feasibility, deck coverage, placements and violations.
-- `maximize_case_count(pallet, case)`: finds the largest number of a case that fits, and returns that count with its layout.
+- `Pallet`: deck length and width, `height` (max build height including the deck), `deck_height`, unit, and optional `max_weight`, `max_volume` and `max_plan_area`. `Pallet.from_standard(name, unit=..., max_build_height=...)` loads the CHEP, GMA, EUR_1200X800 and EUR_1000X1200 presets, and "EURO" is an alias for EUR_1200X800. Preset max weights are in lb for CHEP/GMA and kg for EUR. `Pallet` doesn't store a weight unit, so case weights must use the same unit.
+- `solve_pallet_layout(pallet, cases)`: places the given cases and returns a `LayoutResult`.
+- `maximize_case_count(pallet, case)`: returns the largest count that fits, with its `LayoutResult`.
+- `LayoutResult` contains:
+  - `placements`: x, y, z, size and orientation for each case, with z measured from the top of the deck.
+  - `feasible` and `violations`.
+  - `layers`, `cases_per_layer` and `max_layers`. Capacity is `max_layers × cases_per_layer`.
+  - `utilization`: deck coverage of the base layer.
+  - `volume_utilization`: case volume as a share of the space above the deck.
+  - `total_weight`.
 
 Example:
 
 ```python
 from pallet_builder import Case, Pallet, maximize_case_count, solve_pallet_layout
 
-pallet = Pallet.from_standard("CHEP", unit="in", max_load_height=60)
-case = Case("Widget", length=8, width=5, height=6, weight=12, unit="in")
+pallet = Pallet.from_standard("CHEP", unit="in", max_build_height=60)  # 54in above the 6in deck
+case = Case("Widget", length=8, width=5, height=6, weight=4, unit="in")
 
 count, layout = maximize_case_count(pallet, case)
-print(count, f"{layout.utilization:.0%}")  # 48 100%
+print(count, layout.layers, layout.cases_per_layer)  # 432 9 48
 
-result = solve_pallet_layout(pallet, [Case("Widget", 8, 5, 6, weight=12, quantity=30)])
-print(result.feasible, len(result.placements))  # True 30
+result = solve_pallet_layout(pallet, [Case("Widget", 8, 5, 6, weight=4, quantity=100)])
+print(result.feasible, result.layers)  # True 3  (two full layers + a top layer of 4)
 ```
 
-## Recommendations for future versions
-
-The next version should likely add:
-
-- exact 2D/3D packing with candidate placement generation for single-case runs
-- support for more pallet profiles and unit conversions
-- legal stacking and column rules
-- center-of-gravity and load distribution checks
-- a weighted objective function with tunable coefficients
-- a GA or local-search improvement stage for difficult layouts
-- a richer API that outputs a pallet map, layer list, and explicit reasons for infeasibility
-
-## UI roadmap
-
-The next major step is a simple user interface for this single-case workflow. The UI should allow a user to:
-
-- select a pallet type or enter custom pallet dimensions
-- enter one case type: length, width, height, weight, and quantity
-- choose units (in, mm, cm, etc.)
-- review a live pallet plan with x/y placement coordinates
-- see utilization, overhang, underhang, and feasibility indicators
-- export or save the computed layout for later review
-
-The interface should stay intentionally narrow: one pallet, one case type, one optimization run at a time. This keeps the UX straightforward while the solver remains focused on the core problem.
-
 ## Streamlit UI
-
-The project now includes a simple Streamlit front-end for the single-case pallet workflow.
 
 Run it with:
 
@@ -227,16 +226,37 @@ Run it with:
 uv run streamlit run app.py
 ```
 
-The app re-solves as inputs change. The sidebar holds every input that affects the solve:
+The app re-solves whenever an input changes. Every input that affects the solve is in the sidebar:
 
-- **Pallet**: preset (CHEP, GMA, EUR 1200×800, EUR 1000×1200) or custom dimensions, length and weight units, max load height, max weight, plus max volume, max plan area and deck height under "More limits". Setting a limit to 0 means no limit.
-- **Case**: length, width, height, weight and unit, plus *This side up*. Turning *This side up* off lets the solver tip cases.
-- **Solve**: *Max cases* finds the largest count that fits. *Fixed quantity* places a given number of cases and can turn on the GA optimizer (generations, population, seed).
+- **Pallet**:
+  - Preset (CHEP, GMA, EUR 1200×800, EUR 1000×1200) or custom dimensions.
+  - Length and weight units. Changing a unit converts the values already entered.
+  - Max build height (including the pallet), deck height and max weight.
+  - Max volume and max plan area, under "More limits".
+  - Choosing a preset fills in typical values (60" or 1800 mm build height). Editing a pallet dimension switches the preset to "Custom". A limit of 0 means no limit.
+- **Case**: length, width, height, weight and unit, plus *This side up*.
+- **Solve**:
+  - *Max cases* stacks as many full, flat layers as fit within the limits.
+  - *Fixed quantity* places a given number of cases and reports any that don't fit.
 
-The results page shows the plan view next to the status, case count, deck coverage, load weight and height, and what limits the count. Tabs below give the placement table and a JSON export of the inputs and layout.
+The results area shows:
+
+- **Headline**: the case count and layer breakdown, e.g. "96 cases fit · 6 layers × 16".
+- **3D view**: an interactive Plotly model of the built pallet. Drag to spin, scroll to zoom, right-drag to pan, and use the Iso, Front, Side and Top buttons to reset the viewpoint. The deck is brown, layers alternate shades, and red dashes mark the max build height. Loads over 6,000 cases are drawn as one block per layer.
+- **Layer plan**: a 2D view of the layer pattern. Rotated cases are highlighted.
+- **Metrics**: status, cases, layers, cube use, deck coverage, load weight, build height (deck + load) and headroom.
+- **Limit**: what stops the count going higher (pallet space, max weight, max volume or max plan area), or why a run is infeasible.
+- **Tabs**: a placement table (layer and x/y/z for each case) and a JSON export of every input and the full layout.
+
+## Recommendations for future versions
+
+- **Interlocking layers**: alternate the pattern between layers (column vs. interlocked stacking) for load stability.
+- **Better patterns**: non-guillotine layer patterns (for example pinwheels) for awkward case sizes, where the block packer can fall short of the area bound.
+- **Stability checks**: center-of-gravity and load-distribution checks, and a per-case crush or max-stack-weight limit.
+- **Weighted objective**: tunable coefficients to trade density against stability.
+- **Mixed loads**: support for more than one case type per pallet.
+- **Export**: printable loading instructions (a layer sheet) alongside the JSON.
 
 ## Summary
 
-This is a real-world rectangular packing problem with strong operational constraints. A good single-case solution will combine a constructive heuristic with a more rigorous optimization layer. For this project, the initial implementation is intentionally limited to one case type per pallet run, which keeps the model easier to reason about, easier to validate, and easier to present in a UI.
-
-The next phase is a front-end that lets a user enter a pallet and one case type, then immediately see a loading plan, utilization, and feasibility results.
+This is a real-world rectangular packing problem with strong operational constraints. The project deliberately handles one case type per pallet run, which keeps the model easy to reason about, validate and present. Within that scope, it packs each layer exactly with block patterns, stacks flat layers to the max build height, respects weight, volume and area limits, explains what limits each result, and shows the built pallet in an interactive 3D view.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import streamlit as st
 from matplotlib.patches import Patch, Rectangle
 
@@ -18,9 +19,13 @@ from pallet_builder import (
 APP_VERSION = "0.1.0"
 LENGTH_UNITS = ["in", "mm", "cm", "m", "ft"]
 WEIGHT_UNITS = {"lb": 0.45359237, "kg": 1.0}  # kilograms per unit
+# Typical max build heights (floor to top of load, including the pallet) applied with a preset.
+DEFAULT_BUILD_HEIGHT = {"in": 60.0, "mm": 1800.0}
 CUSTOM = "Custom"
 MODE_MAX = "Max cases"
 MODE_FIXED = "Fixed quantity"
+# Above this many cases the 3D view draws each layer as one block to stay responsive.
+MAX_3D_CASES = 6000
 
 st.set_page_config(page_title="Pallet Builder", page_icon="📦", layout="wide")
 st.markdown(
@@ -51,12 +56,18 @@ def _apply_preset() -> None:
         return
     spec = STANDARD_PALLETS[name]
     unit = spec["unit"]
+    # The preset sets the weight unit; keep the case weight's physical value when it changes.
+    old_weight_unit = st.session_state.get("w_unit", spec["weight_unit"])
+    if "c_weight" in st.session_state and old_weight_unit != spec["weight_unit"]:
+        factor = WEIGHT_UNITS[old_weight_unit] / WEIGHT_UNITS[spec["weight_unit"]]
+        st.session_state.c_weight = _round(st.session_state.c_weight * factor)
     st.session_state.update(
         p_unit=unit,
         _p_unit_prev=unit,
         p_len=float(spec["length"]),
         p_wid=float(spec["width"]),
         p_deck=float(spec["deck_height"]),
+        p_height=DEFAULT_BUILD_HEIGHT[unit],
         w_unit=spec["weight_unit"],
         _w_unit_prev=spec["weight_unit"],
         p_maxw=float(spec["max_weight"]),
@@ -97,7 +108,6 @@ def _init_state() -> None:
         return
     st.session_state.update(
         preset="CHEP",
-        p_height=0.0,
         p_maxvol=0.0,
         p_maxarea=0.0,
         c_len=12.0,
@@ -108,11 +118,7 @@ def _init_state() -> None:
         _c_unit_prev="in",
         c_tsu=True,
         mode=MODE_MAX,
-        qty=20,
-        opt=False,
-        ga_gens=12,
-        ga_pop=12,
-        ga_seed=0,
+        qty=40,
     )
     _apply_preset()
 
@@ -135,7 +141,7 @@ def _num(label: str, key: str, *, on_change=None, help: str | None = None, min_v
 # --- Solving --------------------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def _solve(pallet_args: dict, case_args: dict, mode: str, qty: int, opt: dict | None):
+def _solve(pallet_args: dict, case_args: dict, mode: str, qty: int):
     pallet = Pallet(**pallet_args)
     case = Case(**case_args)
     if mode == MODE_MAX:
@@ -143,18 +149,7 @@ def _solve(pallet_args: dict, case_args: dict, mode: str, qty: int, opt: dict | 
         # Re-solve one more case to explain what stops the count going higher.
         limit = solve_pallet_layout(pallet, [Case(**{**case_args, "quantity": count + 1})]).violations if count else []
         return count, result, limit
-    case_args = {**case_args, "quantity": qty}
-    if opt:
-        result = solve_pallet_layout(
-            pallet,
-            [Case(**case_args)],
-            optimize=True,
-            optimization_generations=opt["gens"],
-            optimization_population=opt["pop"],
-            optimization_seed=opt["seed"],
-        )
-    else:
-        result = solve_pallet_layout(pallet, [Case(**case_args)])
+    result = solve_pallet_layout(pallet, [Case(**{**case_args, "quantity": qty})])
     return len(result.placements), result, []
 
 
@@ -163,7 +158,7 @@ def _summarize_violations(violations: list[str]) -> list[str]:
     no_room = [v for v in violations if v.startswith("No feasible footprint")]
     summary = [v for v in violations if v not in no_room]
     if no_room:
-        summary.append(f"{len(no_room)} case(s) had no room left on the deck.")
+        summary.append(f"{len(no_room)} case(s) had no room left on the pallet.")
     return summary
 
 
@@ -175,22 +170,123 @@ def _limit_reason(violations: list[str]) -> str:
         return "max volume"
     if "plan area" in text:
         return "max plan area"
-    if "height" in text:
-        return "max load height"
-    return "deck footprint"
+    return "pallet space"
 
 
 # --- Rendering ------------------------------------------------------------------------------
 
-def _render_plan(pallet: Pallet, result) -> None:
+_BOX_FACES = [(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7), (0, 1, 5), (0, 5, 4),
+              (1, 2, 6), (1, 6, 5), (2, 3, 7), (2, 7, 6), (3, 0, 4), (3, 4, 7)]
+_BOX_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+
+
+def _corners(x, y, z, length, width, height):
+    return [
+        (x, y, z), (x + length, y, z), (x + length, y + width, z), (x, y + width, z),
+        (x, y, z + height), (x + length, y, z + height), (x + length, y + width, z + height), (x, y + width, z + height),
+    ]
+
+
+def _box_mesh(boxes: list[tuple], colors: list[str], **kwargs) -> go.Mesh3d:
+    """All boxes as one mesh trace (one trace per box would make large loads sluggish)."""
+    xs, ys, zs, i, j, k, face_colors = [], [], [], [], [], [], []
+    for n, (box, color) in enumerate(zip(boxes, colors)):
+        for cx, cy, cz in _corners(*box):
+            xs.append(cx)
+            ys.append(cy)
+            zs.append(cz)
+        for a, b, c in _BOX_FACES:
+            i.append(8 * n + a)
+            j.append(8 * n + b)
+            k.append(8 * n + c)
+            face_colors.append(color)
+    return go.Mesh3d(x=xs, y=ys, z=zs, i=i, j=j, k=k, facecolor=face_colors, flatshading=True,
+                     hoverinfo="skip", lighting={"ambient": 0.75, "diffuse": 0.6, "specular": 0.05}, **kwargs)
+
+
+def _box_edges(boxes: list[tuple], color: str, width: float = 1.5, dash: str | None = None) -> go.Scatter3d:
+    xs, ys, zs = [], [], []
+    for box in boxes:
+        corners = _corners(*box)
+        for a, b in _BOX_EDGES:
+            for point in (corners[a], corners[b], (None, None, None)):
+                xs.append(point[0])
+                ys.append(point[1])
+                zs.append(point[2])
+    return go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", hoverinfo="skip",
+                        line={"color": color, "width": width, "dash": dash})
+
+
+def _render_3d(pallet: Pallet, result) -> None:
+    deck = pallet.deck_height or 0.0
+    layer_index = {z: n for n, z in enumerate(sorted({p.z for p in result.placements}))}
+    shades = ["#3b82f6", "#93c5fd"]  # alternate layers so the stack reads clearly
+
+    if len(result.placements) <= MAX_3D_CASES:
+        boxes = [(p.x, p.y, p.z + deck, p.length, p.width, p.height) for p in result.placements]
+        colors = [shades[layer_index[p.z] % 2] for p in result.placements]
+        draw_edges = True
+    else:
+        # One block per layer: the bounding box of that layer's cases.
+        boxes, colors = [], []
+        for z, n in layer_index.items():
+            layer = [p for p in result.placements if p.z == z]
+            x0, y0 = min(p.x for p in layer), min(p.y for p in layer)
+            x1, y1 = max(p.x + p.length for p in layer), max(p.y + p.width for p in layer)
+            boxes.append((x0, y0, z + deck, x1 - x0, y1 - y0, layer[0].height))
+            colors.append(shades[n % 2])
+        draw_edges = True
+        st.caption(f"{len(result.placements):,} cases: each layer is drawn as a single block.")
+
+    traces = []
+    if deck:
+        deck_box = [(0.0, 0.0, 0.0, pallet.length, pallet.width, deck)]
+        traces += [_box_mesh(deck_box, ["#b45309"]), _box_edges(deck_box, "#78350f", 2)]
+    traces.append(_box_mesh(boxes, colors))
+    if draw_edges:
+        traces.append(_box_edges(boxes, "#1e3a8a", 1.2))
+    if pallet.height:
+        envelope = [(0.0, 0.0, 0.0, pallet.length, pallet.width, pallet.height)]
+        traces.append(_box_edges(envelope, "#ef4444", 2, dash="dash"))
+
+    def camera(eye_x, eye_y, eye_z, up_y=0.0, up_z=1.0):
+        return {"scene.camera": {"eye": {"x": eye_x, "y": eye_y, "z": eye_z}, "up": {"x": 0, "y": up_y, "z": up_z}}}
+
+    views = [("Iso", camera(1.5, -1.5, 1.1)), ("Front", camera(0, -2.3, 0.2)),
+             ("Side", camera(2.3, 0, 0.2)), ("Top", camera(0, 0, 2.6, up_y=1.0, up_z=0.0))]
+    fig = go.Figure(traces)
+    unit = pallet.unit
+    fig.update_layout(
+        height=470,
+        margin={"l": 0, "r": 0, "t": 30, "b": 0},
+        showlegend=False,
+        scene={
+            "aspectmode": "data",
+            "xaxis": {"title": f"Length ({unit})"},
+            "yaxis": {"title": f"Width ({unit})"},
+            "zaxis": {"title": f"Height ({unit})"},
+            "camera": views[0][1]["scene.camera"],
+        },
+        updatemenus=[{
+            "type": "buttons", "direction": "right", "x": 0, "y": 1.07, "xanchor": "left",
+            "showactive": False, "pad": {"r": 4},
+            "buttons": [{"label": label, "method": "relayout", "args": [args]} for label, args in views],
+        }],
+    )
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "scrollZoom": True})
+    st.caption("Drag to spin · scroll to zoom · right-drag to pan · buttons reset the viewpoint. "
+               "Brown = pallet deck, red dashes = max build height.")
+
+
+def _render_plan(pallet: Pallet, placements) -> None:
     # Size the figure so the plan's longest side is ~3in: it fits on screen beside the summary.
     scale = 3.0 / max(pallet.length, pallet.width)
     fig, ax = plt.subplots(figsize=(pallet.length * scale + 0.9, pallet.width * scale + 1.0), dpi=100)
     ax.add_patch(Rectangle((0, 0), pallet.length, pallet.width, facecolor="#f1f5f9", edgecolor="#0f172a", linewidth=2))
 
     base_color, rotated_color = "#93c5fd", "#fcd34d"
-    label_cases = len(result.placements) <= 80
-    for index, placement in enumerate(result.placements, start=1):
+    label_cases = len(placements) <= 80
+    for index, placement in enumerate(placements, start=1):
         rotated = placement.orientation[:2] != (0, 1)
         ax.add_patch(
             Rectangle(
@@ -225,9 +321,11 @@ def _render_plan(pallet: Pallet, result) -> None:
 
 
 def _placement_rows(result) -> list[dict]:
+    layer_index = {z: n for n, z in enumerate(sorted({p.z for p in result.placements}), start=1)}
     return [
         {
             "#": index,
+            "layer": layer_index[p.z],
             "x": round(p.x, 3),
             "y": round(p.y, 3),
             "z": round(p.z, 3),
@@ -263,17 +361,22 @@ with st.sidebar:
         _num("Width", "p_wid", on_change=_mark_custom, min_value=0.001)
     c1, c2 = st.columns(2)
     with c1:
-        _num("Max load height", "p_height", help="Height of the load above the deck. 0 = no limit.")
+        _num("Max build height", "p_height",
+             help="Floor to top of load, including the pallet. Sets how many layers stack. "
+                  "0 = no limit (single layer).")
     with c2:
+        _num("Deck height", "p_deck", on_change=_mark_custom, min_value=0.001,
+             help="The pallet's own height; counts toward the max build height.")
+    c1, c2 = st.columns(2)
+    with c1:
         _num("Max weight", "p_maxw", on_change=_mark_custom, help="Total case weight. 0 = no limit.")
     with st.expander("More limits", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
             _num(f"Max volume ({st.session_state.p_unit}³)", "p_maxvol", help="0 = no limit.")
         with c2:
-            _num(f"Max plan area ({st.session_state.p_unit}²)", "p_maxarea", help="0 = no limit.")
-        _num("Deck height", "p_deck", on_change=_mark_custom, min_value=0.001,
-             help="Pallet's own height. Shown for reference; it does not limit the load.")
+            _num(f"Max plan area ({st.session_state.p_unit}²)", "p_maxarea",
+                 help="Combined case footprint. 0 = no limit.")
 
     st.divider()
     _section("Case")
@@ -288,24 +391,17 @@ with st.sidebar:
     with c1:
         _num(f"Weight ({st.session_state.w_unit})", "c_weight")
     c2.selectbox("Unit", LENGTH_UNITS, key="c_unit", on_change=_convert_case_unit)
-    st.toggle("This side up", key="c_tsu", help="Off lets the solver tip cases onto a side or end.")
+    st.toggle("This side up", key="c_tsu",
+              help="Off lets the solver lay cases on a side or end. Every case in a layer still shares one "
+                   "height, so each layer top stays flat.")
 
     st.divider()
     _section("Solve")
     st.segmented_control("Mode", [MODE_MAX, MODE_FIXED], key="mode", label_visibility="collapsed")
     if st.session_state.mode == MODE_FIXED:
-        c1, c2 = st.columns([1, 1.2])
-        with c1:
-            st.number_input("Quantity", key="qty", min_value=1, step=1)
-        with c2:
-            st.toggle("GA optimizer", key="opt", help="Search alternative placement orders when the greedy packer can't fit them all.")
-        if st.session_state.opt:
-            c1, c2, c3 = st.columns(3)
-            c1.number_input("Generations", key="ga_gens", min_value=1, step=1)
-            c2.number_input("Population", key="ga_pop", min_value=2, step=1)
-            c3.number_input("Seed", key="ga_seed", min_value=0, step=1)
+        st.number_input("Quantity", key="qty", min_value=1, step=1)
     else:
-        st.caption("Finds the most cases that fit one layer. The GA optimizer is available in fixed-quantity mode.")
+        st.caption("Stacks as many full, flat layers as fit the build height, within the weight and other limits.")
 
 ss = st.session_state
 mode = ss.mode or MODE_MAX
@@ -329,22 +425,22 @@ case_args = {
     "unit": ss.c_unit,
     "this_side_up": ss.c_tsu,
 }
-opt_args = {"gens": ss.ga_gens, "pop": ss.ga_pop, "seed": ss.ga_seed} if mode == MODE_FIXED and ss.opt else None
 
 # --- Main area: results ---------------------------------------------------------------------
 
 try:
     pallet = Pallet(**pallet_args)
     with st.spinner("Solving…"):
-        count, result, limit_violations = _solve(pallet_args, case_args, mode, ss.qty, opt_args)
+        count, result, limit_violations = _solve(pallet_args, case_args, mode, ss.qty)
 except ValueError as exc:
     st.error(f"Invalid input: {exc}")
     st.stop()
 
 w_unit = ss.w_unit
+unit = pallet.unit
 placed_weight = count * ss.c_weight
 load_height = max((p.z + p.height for p in result.placements), default=0.0)
-empty_area = pallet.plan_area * (1 - result.utilization)
+build_height = (pallet.deck_height or 0.0) + load_height
 
 if mode == MODE_MAX:
     ok = count > 0
@@ -352,49 +448,67 @@ if mode == MODE_MAX:
 else:
     ok = result.feasible
     headline = f"All {ss.qty} cases fit" if ok else f"{count} of {ss.qty} cases placed"
+if count:
+    headline += f" · {result.layers} layer{'s' if result.layers != 1 else ''} × {result.cases_per_layer}"
 
 pallet_name = pallet.name or "Custom pallet"
 st.markdown(f"#### {headline}")
 st.caption(
-    f"{pallet_name} · {pallet.length:g}×{pallet.width:g} {pallet.unit} deck · "
+    f"{pallet_name} · {pallet.length:g}×{pallet.width:g} {unit} deck · "
     f"case {ss.c_len:g}×{ss.c_wid:g}×{ss.c_hgt:g} {ss.c_unit} · {mode.lower()}"
 )
 
-plan_col, info_col = st.columns([1.4, 1], gap="large")
-with plan_col:
+view_col, info_col = st.columns([1.5, 1], gap="large")
+with view_col:
     if result.placements:
-        _render_plan(pallet, result)
+        view_3d, view_plan = st.tabs(["3D view", "Layer plan"])
+        with view_3d:
+            _render_3d(pallet, result)
+        with view_plan:
+            st.caption("Every full layer uses this same pattern; a partial top layer fills from case 1.")
+            _render_plan(pallet, [p for p in result.placements if p.z == 0])
     else:
         st.info("Nothing to draw. Adjust the inputs in the sidebar.")
 
 with info_col:
+    limit_text = (
+        f"Limit {pallet.height:g} {unit} (deck {pallet.deck_height or 0:g} + load {pallet.load_height_limit:g})"
+        if pallet.height else "No build height limit"
+    )
     m1, m2 = st.columns(2)
     m1.metric("Status", "Feasible" if ok else "Infeasible")
     m2.metric("Cases", count)
-    m1.metric("Deck coverage", f"{result.utilization:.1%}", help="Share of the deck footprint covered by cases.")
+    m1.metric("Layers", f"{result.layers} × {result.cases_per_layer}" if count else "0",
+              help=f"Layers × cases per layer. Up to {result.max_layers} layers fit the build height.")
+    m2.metric("Cube use", f"{result.volume_utilization:.1%}" if pallet.height else "–",
+              help="Case volume as a share of the space above the deck up to the max build height.")
+    m1.metric("Deck coverage", f"{result.utilization:.1%}", help="Share of the deck covered by the base layer.")
     m2.metric(
         "Load weight",
         f"{placed_weight:,.1f} {w_unit}",
         help=f"Limit: {pallet.max_weight:,.1f} {w_unit}" if pallet.max_weight else "No weight limit",
     )
-    m1.metric(
-        "Load height",
-        f"{load_height:g} {pallet.unit}",
-        help=f"Limit: {pallet.height:g} {pallet.unit}" if pallet.height else "No height limit",
-    )
-    m2.metric("Empty deck", f"{empty_area:,.0f} {pallet.unit}²")
+    m1.metric("Build height", f"{build_height:g} {unit}", help=f"Deck + load, from the floor. {limit_text}.")
+    m2.metric("Headroom", f"{pallet.height - build_height:g} {unit}" if pallet.height else "–",
+              help="Space left under the max build height.")
 
-    if mode == MODE_MAX and ok and limit_violations:
-        st.info(f"Limited by **{_limit_reason(limit_violations)}**: one more case would break it.")
+    if mode == MODE_MAX and ok:
+        if count == result.capacity:
+            if pallet.height:
+                st.info(f"Limited by **pallet space**: {result.max_layers} layers of {result.cases_per_layer} "
+                        f"fill the build height.")
+            else:
+                st.info("Single layer: set a **max build height** to stack layers.")
+        elif limit_violations:
+            st.info(f"Limited by **{_limit_reason(limit_violations)}**: one more case would break it.")
     if result.violations and not (mode == MODE_MAX and ok):
         st.error("\n".join(f"- {v}" for v in _summarize_violations(result.violations)))
 
     rotated = sum(1 for p in result.placements if p.orientation[:2] != (0, 1))
     tipped = sum(1 for p in result.placements if p.orientation[2] != 2)
-    st.caption(
-        f"{count - rotated} as entered · {rotated} rotated · {tipped} tipped · "
-        f"deck height {pallet.deck_height:g} {pallet.unit} (not counted in load height)"
-    )
+    partial = count - (result.layers - 1) * result.cases_per_layer if count else 0
+    top_note = f" · top layer {partial} of {result.cases_per_layer}" if count and partial < result.cases_per_layer else ""
+    st.caption(f"{count - rotated} as entered · {rotated} rotated · {tipped} tipped{top_note}")
 
 table_tab, export_tab = st.tabs(["Placements", "Export"])
 with table_tab:
@@ -406,11 +520,15 @@ with export_tab:
         "weight_unit": w_unit,
         "mode": mode,
         "quantity": ss.qty if mode == MODE_FIXED else None,
-        "optimizer": opt_args,
         "result": {
             "cases": count,
             "feasible": ok,
+            "layers": result.layers,
+            "cases_per_layer": result.cases_per_layer,
+            "max_layers": result.max_layers,
+            "build_height": build_height,
             "deck_coverage": result.utilization,
+            "cube_utilization": result.volume_utilization,
             "placed_weight": placed_weight,
             "violations": result.violations,
             "placements": _placement_rows(result),

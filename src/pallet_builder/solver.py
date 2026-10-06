@@ -108,8 +108,9 @@ class Case:
 class Pallet:
     """Physical pallet envelope and operational constraints.
 
-    ``height`` is the maximum load height above the deck (``None`` means no limit).
-    ``deck_height`` is the pallet's own height and is informational only.
+    ``height`` is the maximum build height measured from the floor, so it includes the pallet's own
+    ``deck_height``; the space left for cases is ``height - deck_height``. With ``height=None`` the
+    solver builds a single layer.
     """
 
     length: float
@@ -126,13 +127,15 @@ class Pallet:
         if self.length <= 0 or self.width <= 0:
             raise ValueError("Pallet length and width must be positive.")
         if self.height is not None and self.height <= 0:
-            raise ValueError("Pallet max load height must be positive when provided.")
+            raise ValueError("Pallet max build height must be positive when provided.")
         if self.deck_height is not None and self.deck_height <= 0:
             raise ValueError("Pallet deck height must be positive when provided.")
+        if self.height is not None and self.deck_height is not None and self.height <= self.deck_height:
+            raise ValueError("Pallet max build height must be greater than the deck height.")
         normalize_unit(self.unit)
 
     @classmethod
-    def from_standard(cls, name: str, *, unit: str = "in", max_load_height: float | None = None) -> Pallet:
+    def from_standard(cls, name: str, *, unit: str = "in", max_build_height: float | None = None) -> Pallet:
         key = str(name).upper()
         key = _STANDARD_PALLET_ALIASES.get(key, key)
         if key not in _STANDARD_PALLETS:
@@ -146,7 +149,7 @@ class Pallet:
         return cls(
             length=length,
             width=width,
-            height=max_load_height,
+            height=max_build_height,
             unit=unit,
             max_weight=max_weight,
             name=name,
@@ -156,6 +159,13 @@ class Pallet:
     @property
     def plan_area(self) -> float:
         return self.length * self.width
+
+    @property
+    def load_height_limit(self) -> float | None:
+        """Height available for cases above the deck, or ``None`` when there is no build limit."""
+        if self.height is None:
+            return None
+        return self.height - (self.deck_height or 0.0)
 
 
 @dataclass
@@ -179,6 +189,15 @@ class LayoutResult:
     underhang: float
     feasible: bool
     violations: list[str] = field(default_factory=list)
+    layers: int = 0
+    cases_per_layer: int = 0
+    max_layers: int = 0
+    volume_utilization: float = 0.0
+
+    @property
+    def capacity(self) -> int:
+        """Cases that fit by geometry alone (layers that fit the build height x cases per layer)."""
+        return self.max_layers * self.cases_per_layer
 
 
 def _orientations_for(case: Case) -> list[tuple[int, int, int]]:
@@ -299,7 +318,6 @@ def _positions_for_orientations(
 # Python, so the block packer falls back to one-cut (two-block) patterns.
 _MAX_GUILLOTINE_STATES = 6000
 _UNLIMITED_CUTS = -1
-_GREEDY_FALLBACK_MAX_CASES = 400
 
 
 def _normal_positions(limit: float, sizes: Sequence[float]) -> list[float]:
@@ -390,53 +408,82 @@ def _block_layout(
     return tuple(sorted(spots, key=lambda spot: (spot[1], spot[0])))
 
 
-def _pack_single_type(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
-    case = cases[0]
-    orientations = _orientations_for(case)
-    within_height = orientations
-    if pallet.height is not None:
-        within_height = [o for o in orientations if case.oriented_dimensions(o)[2] <= pallet.height + 1e-9]
+@dataclass(frozen=True)
+class _LayerPlan:
+    spots: tuple[tuple[float, float, int], ...]
+    orientations: tuple[tuple[int, int, int], ...]
+    layer_height: float
+    layers: int
 
-    spots: tuple[tuple[float, float, int], ...] = ()
-    # Prefer orientations under the height limit; if none of them fit, fall back to all of them so
-    # the height check reports the real reason instead of a footprint error.
-    for candidates in (within_height, orientations):
+    @property
+    def capacity(self) -> int:
+        return self.layers * len(self.spots)
+
+
+def _plan_layers(pallet: Pallet, case: Case) -> _LayerPlan | None:
+    """Pick the orientation family that stacks the most cases within the build height.
+
+    Orientations are grouped by which case dimension stands vertical; each group gets its own
+    block-packed layer pattern, repeated for as many layers as fit. Ties favour more cases per
+    layer (a wider, more stable base). If no orientation fits the height at all, the best layer is
+    returned with ``layers=0`` so the caller can report the height violation.
+    """
+    limit = pallet.load_height_limit
+    groups: dict[float, list[tuple[int, int, int]]] = {}
+    for orientation in _orientations_for(case):
+        groups.setdefault(round(case.oriented_dimensions(orientation)[2], 9), []).append(orientation)
+
+    best: _LayerPlan | None = None
+    for layer_height, orientations in groups.items():
         footprints: list[tuple[float, float]] = []
         footprint_orientations: list[tuple[int, int, int]] = []
-        for orientation in candidates:
+        for orientation in orientations:
             length, width, _ = case.oriented_dimensions(orientation)
             footprint = (round(length, 9), round(width, 9))
             if footprint not in footprints:
                 footprints.append(footprint)
                 footprint_orientations.append(orientation)
-        if footprints:
-            spots = _block_layout(round(pallet.length, 9), round(pallet.width, 9), tuple(footprints))
-        if spots:
-            break
+        spots = _block_layout(round(pallet.length, 9), round(pallet.width, 9), tuple(footprints))
+        if not spots:
+            continue
+        layers = 1 if limit is None else int((limit + 1e-9) // layer_height)
+        plan = _LayerPlan(spots, tuple(footprint_orientations), layer_height, layers)
+        if best is None or (plan.capacity, len(plan.spots)) > (best.capacity, len(best.spots)):
+            best = plan
+    return best
 
-    placements = []
-    for (x, y, index), item in zip(spots, cases):
-        orientation = footprint_orientations[index]
+
+def _pack_single_type(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], list[str], _LayerPlan | None]:
+    plan = _plan_layers(pallet, cases[0])
+    if plan is None:
+        return [], ["No cases could be placed on the pallet."], None
+
+    per_layer = len(plan.spots)
+    # Stack whole layers; a partial top layer fills from the origin outward. With no layer fitting
+    # the height, still place one layer so the height check explains why the load fails.
+    available_layers = max(plan.layers, 1)
+    placements: list[Placement] = []
+    for index, item in enumerate(cases[: per_layer * available_layers]):
+        layer, slot = divmod(index, per_layer)
+        x, y, footprint_index = plan.spots[slot]
+        orientation = plan.orientations[footprint_index]
         length, width, height = item.oriented_dimensions(orientation)
-        placements.append(Placement(item.name, x, y, 0.0, length, width, height, orientation))
+        placements.append(Placement(item.name, x, y, layer * plan.layer_height, length, width, height, orientation))
 
-    if not placements:
-        return [], 0.0, ["No cases could be placed on the pallet."]
     violations = [f"No feasible footprint for case {item.name!r} on the pallet." for item in cases[len(placements):]]
-    used_area = sum(placement.length * placement.width for placement in placements)
-    return placements, used_area / pallet.plan_area, violations
+    return placements, violations, plan
 
 
-def _pack_layer(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
+def _pack_layer(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], list[str], tuple[int, int, int]]:
+    """Pack the load; returns placements, violations and (layers used, cases per layer, max layers)."""
     if cases and _single_case_type(cases):
-        block = _pack_single_type(pallet, cases)
-        # The greedy packer can occasionally find a non-guillotine layout that beats the block
-        # packer, but it is O(n^2), so only try it on modest loads.
-        if len(block[0]) == len(cases) or len(cases) > _GREEDY_FALLBACK_MAX_CASES:
-            return block
-        greedy = _pack_greedy(pallet, cases)
-        return greedy if len(greedy[0]) > len(block[0]) else block
-    return _pack_greedy(pallet, cases)
+        placements, violations, plan = _pack_single_type(pallet, cases)
+        if plan is None:
+            return placements, violations, (0, 0, 0)
+        layers_used = len({placement.z for placement in placements})
+        return placements, violations, (layers_used, len(plan.spots), plan.layers)
+    placements, _, violations = _pack_greedy(pallet, cases)
+    return placements, violations, (1 if placements else 0, len(placements), 1)
 
 
 def _pack_greedy(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement], float, list[str]]:
@@ -447,7 +494,7 @@ def _pack_greedy(pallet: Pallet, cases: Sequence[Case]) -> tuple[list[Placement]
 
     for case in sorted(cases, key=lambda item: (item.length * item.width, max(item.length, item.width), item.height), reverse=True):
         candidate: tuple[float, float, float, float, tuple[int, int, int]] | None = None
-        for position in _candidate_positions(case, free_rectangles, pallet.height):
+        for position in _candidate_positions(case, free_rectangles, pallet.load_height_limit):
             x, y, length, width, orientation = position
             if candidate is None or (length * width) > (candidate[2] * candidate[3]):
                 candidate = (x, y, length, width, orientation)
@@ -494,9 +541,9 @@ def maximize_case_count(
 ) -> tuple[int, LayoutResult]:
     """Return the maximum number of identical cases that fit on a pallet.
 
-    The function uses a binary search over the feasible count and returns both the count and the
-    final layout that achieves that maximum. A progress callback may be passed to report iteration
-    progress during the search.
+    Capacity is the number of layers that fit the build height times the cases per layer, capped
+    by the weight, volume and plan-area limits. Returns the count and the layout that achieves it.
+    ``progress_callback`` is kept for compatibility and is called once with the final result.
     """
 
     case = _coerce_case(case, pallet.unit)
@@ -507,48 +554,25 @@ def maximize_case_count(
     if case.quantity <= 0:
         raise ValueError("Case quantity must be positive for max-case search.")
 
-    min_footprint = min(
-        case.oriented_dimensions(orientation)[0] * case.oriented_dimensions(orientation)[1]
-        for orientation in _orientations_for(case)
-    )
-    upper_bound = int(pallet.plan_area // min_footprint)
+    plan = _plan_layers(pallet, case)
+    count = plan.capacity if plan is not None else 0
     if pallet.max_weight is not None and case.weight > 0:
-        upper_bound = min(upper_bound, int(pallet.max_weight // case.weight))
+        count = min(count, int(pallet.max_weight // case.weight))
     if pallet.max_plan_area is not None:
-        upper_bound = min(upper_bound, int(pallet.max_plan_area // min_footprint))
+        count = min(count, int(pallet.max_plan_area // case.footprint_area))
     if pallet.max_volume is not None:
-        upper_bound = min(upper_bound, int(pallet.max_volume // case.volume))
+        count = min(count, int(pallet.max_volume // case.volume))
 
-    if upper_bound <= 0:
-        # Solve a single case so the caller sees which limit (weight, volume, area) rules it out.
-        _, explanation = _explain_single_case(pallet, case)
-        return 0, explanation
+    if count <= 0:
+        # Solve a single case so the caller sees which limit (height, weight, ...) rules it out.
+        return _explain_single_case(pallet, case)
 
-    lower_bound = 1
-    best_count = 0
-    best_result = LayoutResult([], 0.0, 0.0, 0.0, 0.0, False, ["No cases fit."])
-    iterations = 0
-
-    while lower_bound <= upper_bound:
-        iterations += 1
-        mid = (lower_bound + upper_bound) // 2
-        result = solve_pallet_layout(pallet, [replace(case, quantity=mid)])
-
-        if progress_callback is not None:
-            progress_callback(iterations, lower_bound, upper_bound, mid, result)
-
-        if result.feasible and len(result.placements) == mid:
-            best_count = mid
-            best_result = result
-            lower_bound = mid + 1
-        else:
-            upper_bound = mid - 1
-
-    if best_count == 0:
-        _, explanation = _explain_single_case(pallet, case)
-        return 0, explanation
-
-    return best_count, best_result
+    result = solve_pallet_layout(pallet, [replace(case, quantity=count)])
+    if progress_callback is not None:
+        progress_callback(1, count, count, count, result)
+    if not result.feasible:
+        return _explain_single_case(pallet, case)
+    return count, result
 
 
 def _explain_single_case(pallet: Pallet, case: Case) -> tuple[int, LayoutResult]:
@@ -564,12 +588,13 @@ def _single_case_type(cases: Sequence[Case]) -> bool:
     return all((case.length, case.width, case.height) == signature for case in cases[1:])
 
 
-def _evaluate_case_order(
+def _evaluate_load(
     pallet: Pallet,
     cases: Sequence[Case],
-) -> tuple[float, LayoutResult]:
-    placements, utilization, packing_violations = _pack_layer(pallet, cases)
-    violations: list[str] = list(packing_violations)
+    violations: list[str] | None = None,
+) -> LayoutResult:
+    placements, packing_violations, (layers, per_layer, max_layers) = _pack_layer(pallet, cases)
+    violations = [*(violations or []), *packing_violations]
 
     overhang = 0.0
     for placement in placements:
@@ -577,23 +602,42 @@ def _evaluate_case_order(
             overhang += placement.x + placement.length - pallet.length
         if placement.y + placement.width > pallet.width + 1e-9:
             overhang += placement.y + placement.width - pallet.width
-    underhang = max(0.0, pallet.plan_area - sum(placement.length * placement.width for placement in placements))
+    base = [placement for placement in placements if placement.z <= 1e-9]
+    base_area = sum(placement.length * placement.width for placement in base)
+    underhang = max(0.0, pallet.plan_area - base_area)
 
-    if pallet.height is not None:
-        max_z = max((placement.z + placement.height for placement in placements), default=0.0)
-        if max_z > pallet.height:
-            violations.append(f"Case stacking exceeds pallet height {pallet.height:.3f} with max z {max_z:.3f}.")
+    limit = pallet.load_height_limit
+    volume_utilization = 0.0
+    if limit is not None:
+        load_height = max((placement.z + placement.height for placement in placements), default=0.0)
+        if load_height > limit + 1e-9:
+            violations.append(
+                f"Load height {load_height:.3f} exceeds the {limit:.3f} available above the deck "
+                f"(max build height {pallet.height:.3f})."
+            )
+        placed_volume = sum(placement.length * placement.width * placement.height for placement in placements)
+        volume_utilization = placed_volume / (pallet.plan_area * limit)
 
-    feasible = not violations and len(placements) == len(cases)
-    result = LayoutResult(
+    return LayoutResult(
         placements=placements,
         total_weight=sum(case.weight for case in cases),
-        utilization=utilization,
+        utilization=base_area / pallet.plan_area,
         overhang=overhang,
         underhang=underhang,
-        feasible=feasible,
+        feasible=not violations and len(placements) == len(cases),
         violations=violations,
+        layers=layers,
+        cases_per_layer=per_layer,
+        max_layers=max_layers,
+        volume_utilization=volume_utilization,
     )
+
+
+def _evaluate_case_order(
+    pallet: Pallet,
+    cases: Sequence[Case],
+) -> tuple[float, LayoutResult]:
+    result = _evaluate_load(pallet, cases)
     return _score_layout_result(pallet, result), result
 
 
@@ -753,32 +797,7 @@ def solve_pallet_layout(
         if improved.feasible:
             return improved
 
-    placements, utilization, packing_violations = _pack_layer(pallet, expanded_cases)
-    violations.extend(packing_violations)
-
-    overhang = 0.0
-    for placement in placements:
-        if placement.x + placement.length > pallet.length + 1e-9:
-            overhang += placement.x + placement.length - pallet.length
-        if placement.y + placement.width > pallet.width + 1e-9:
-            overhang += placement.y + placement.width - pallet.width
-    underhang = max(0.0, pallet.plan_area - sum(placement.length * placement.width for placement in placements))
-
-    if pallet.height is not None:
-        max_z = max((placement.z + placement.height for placement in placements), default=0.0)
-        if max_z > pallet.height:
-            violations.append(f"Case stacking exceeds pallet height {pallet.height:.3f} with max z {max_z:.3f}.")
-
-    feasible = not violations and len(placements) == len(expanded_cases)
-    return LayoutResult(
-        placements=placements,
-        total_weight=total_weight,
-        utilization=utilization,
-        overhang=overhang,
-        underhang=underhang,
-        feasible=feasible,
-        violations=violations,
-    )
+    return _evaluate_load(pallet, expanded_cases, violations)
 
 
 build_layout = solve_pallet_layout

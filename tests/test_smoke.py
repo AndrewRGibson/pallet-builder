@@ -164,9 +164,10 @@ def test_maximize_case_count_for_single_type():
 
     max_count, result = maximize_case_count(pallet, case)
 
-    assert max_count == 10
+    # 10 per layer, and 2-high cases stack twice within the 5-high build.
+    assert max_count == 20
     assert result.feasible
-    assert len(result.placements) == 10
+    assert (result.layers, result.cases_per_layer) == (2, 10)
 
 
 def test_maximize_case_count_handles_single_positive_fit_without_zero_quantity_search():
@@ -175,9 +176,9 @@ def test_maximize_case_count_handles_single_positive_fit_without_zero_quantity_s
 
     max_count, result = maximize_case_count(pallet, case)
 
-    assert max_count == 1
+    assert max_count == 2
     assert result.feasible
-    assert len(result.placements) == 1
+    assert result.cases_per_layer == 1
 
 
 def test_mixed_case_geometry_rejected_with_clear_reason():
@@ -204,7 +205,8 @@ def test_preset_deck_height_does_not_limit_case_height():
     assert max_count > 0
     assert result.feasible
 
-    capped = Pallet.from_standard("CHEP", unit="in", max_load_height=6)
+    # A 12in build height leaves 6in above the 6in deck: too low for an 8in case.
+    capped = Pallet.from_standard("CHEP", unit="in", max_build_height=12)
     max_count, result = maximize_case_count(capped, Case("T", 12, 10, 8, weight=10))
 
     assert max_count == 0
@@ -305,3 +307,69 @@ def test_partial_load_is_valid_and_reports_unplaced_cases():
     assert len(result.placements) == 48
     assert len([v for v in result.violations if "No feasible footprint" in v]) == 2
     _assert_valid_layer(pallet, result.placements)
+
+
+def _assert_valid_load(pallet, placements):
+    for p in placements:
+        assert p.x >= -1e-9 and p.y >= -1e-9 and p.z >= -1e-9
+        assert p.x + p.length <= pallet.length + 1e-6 and p.y + p.width <= pallet.width + 1e-6
+    for i, a in enumerate(placements):
+        for b in placements[i + 1 :]:
+            assert (
+                a.x + a.length <= b.x + 1e-6
+                or b.x + b.length <= a.x + 1e-6
+                or a.y + a.width <= b.y + 1e-6
+                or b.y + b.width <= a.y + 1e-6
+                or a.z + a.height <= b.z + 1e-6
+                or b.z + b.height <= a.z + 1e-6
+            ), (a, b)
+
+
+def test_layers_fill_build_height_including_deck():
+    # 60in build height - 6in CHEP deck = 54in for cases: six 8in layers of 16.
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    max_count, result = maximize_case_count(chep, Case("L", 12, 10, 8, weight=10))
+
+    assert (max_count, result.layers, result.cases_per_layer, result.max_layers) == (96, 6, 16, 6)
+    assert result.feasible
+    assert max(p.z + p.height for p in result.placements) == 48
+    _assert_valid_load(chep, result.placements)
+
+
+def test_every_layer_has_a_flat_top():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    for this_side_up in (True, False):
+        _, result = maximize_case_count(chep, Case("F", 15, 11, 7, this_side_up=this_side_up))
+        by_layer = {}
+        for p in result.placements:
+            by_layer.setdefault(p.z, set()).add(p.height)
+        assert all(len(heights) == 1 for heights in by_layer.values()), by_layer
+
+
+def test_tipping_picks_the_orientation_that_stacks_most():
+    # Upright, a 30in-tall case can't fit in the 20in above the deck; tipped, 10in layers stack twice.
+    pallet = Pallet(length=40, width=48, height=26, deck_height=6, unit="in")
+    upright, _ = maximize_case_count(pallet, Case("T", 10, 10, 30))
+    tipped, result = maximize_case_count(pallet, Case("T", 10, 10, 30, this_side_up=False))
+
+    assert upright == 0
+    assert tipped > 0 and result.layers == 2
+    assert all(p.height == 10 for p in result.placements)
+    _assert_valid_load(pallet, result.placements)
+
+
+def test_weight_limit_leaves_a_partial_top_layer():
+    chep = Pallet.from_standard("CHEP", unit="in", max_build_height=60)
+    chep.max_weight = 200
+    max_count, result = maximize_case_count(chep, Case("W", 12, 10, 8, weight=10))
+
+    assert max_count == 20
+    assert (result.layers, result.cases_per_layer) == (2, 16)
+    _assert_valid_load(chep, result.placements)
+
+
+def test_build_height_must_exceed_deck_height():
+    import pytest
+
+    with pytest.raises(ValueError, match="deck height"):
+        Pallet.from_standard("CHEP", unit="in", max_build_height=6)
