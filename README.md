@@ -287,26 +287,30 @@ The app finds the most cases that fit and re-solves whenever an input changes. E
   - The GA layer search switch, with its generations, population and seed.
   - Settings that don't apply are greyed out rather than hidden, so their values are kept.
 
-The results area is split 50:50 between the 3D view and the results:
+Below the headline (the case count and layer breakdown, e.g. "96 cases fit · 6 layers × 16"), the results fill the page width as one set of tabs:
 
-- **Headline**: the case count and layer breakdown, e.g. "96 cases fit · 6 layers × 16".
-- **3D view**: an interactive Plotly model of the built pallet. Drag to spin (turntable rotation, so the pallet stays upright), scroll to zoom, and use the Iso, Front, Side and Top buttons to reset the viewpoint. The orbital-rotation and pan tools are removed. The deck is brown, layers alternate shades, and red dashes mark the max build height. Loads over 6,000 cases are drawn as one block per layer.
-- **Metrics**: cases, malleable bound, layers, cube use, deck coverage, load weight, build height (deck + load), headroom, interlock and minimum support. A caption names the stacking and flip, e.g. "even layers rotated 180°".
-- **Limit**: what stops the count going higher (pallet space, max weight, max volume or max plan area), or why a run is infeasible.
-- **Solver status**:
-  - A table of every solver run, with the total solve time: layer family, cases per layer, the bound, interlock, iterations, evaluations, time, whether it was used, and notes (for example why the GA was skipped).
-  - When the GA runs, a chart of its best and mean objective per generation, plus best interlock on a second axis when stacking interlocks. The bound and the block packer's score are drawn as reference lines.
-- **Tabs**:
-  - **Placements**: the layer, pattern (A or flipped B), x/y/z and size for each case. Columns fit their content.
-  - **Sensitivity**: re-solves every combination of case-size changes. Each of length, width and height is either left unchanged or moved by one of its own steps, independently of the others.
-    - **Settings table:** each dimension has its own on/off, change type (a fixed amount, default 0.2 in / 0.5 cm, or a percentage, default 2%), step size, and 1–3 steps each way (default 1).
-    - **Runs:** (2n+1)³ − 1 for n steps on all three dimensions: 26 at 1 step, up to 342 at 3. A progress bar shows the run. Steps that would take a dimension to zero or below are skipped and listed.
-    - **Results:** for each combination, the change to each dimension ("–" when unchanged), the case size, cases and the change from the base, Ti (cases per layer) and Hi (layers), deck coverage, cube use and interlock. Case counts and percentage columns are drawn as in-cell bars.
-    - **Order:** the base case is highlighted at the top, and the combinations follow, ranked by fitness: most cases, then cube use, interlock and deck coverage.
-  - **Export**:
-    - **Excel**: Summary, Placements, Solver runs, GA history and Sensitivity sheets.
-    - **CSV**: the placement grid.
-    - **JSON**: everything, including the inputs.
+- **Overview**: what the app is for, how to use the sidebar, how the solver works, and what each tab shows.
+- **Summary**:
+  - **Metrics:** cases, layers (Hi × Ti), malleable bound, cube use, deck coverage, load weight, build height (deck + load), headroom, interlock and minimum support.
+  - **Limit:** what stops the count going higher (pallet space, max weight, max volume or max plan area), or why a run is infeasible. A caption names the stacking and flip, e.g. "even layers rotated 180°".
+  - **Solver status:** a table of every solver run, with the total solve time. It lists layer family, cases per layer, the bound, interlock, iterations, evaluations, time, whether the run was used, and notes such as why the GA was skipped. Solver and Layers stay pinned when scrolling.
+- **3D view**: an interactive Plotly model of the built pallet.
+  - Drag to spin (turntable rotation, so the pallet stays upright), scroll to zoom, and use the Iso, Front, Side and Top buttons to reset the viewpoint.
+  - The deck is brown, layers alternate shades, and red dashes mark the max build height.
+  - Loads over 6,000 cases are drawn as one block per layer.
+- **Placements**: the layer, pattern (A or flipped B), x/y/z and size for each case.
+- **By iteration**: the GA's best and mean objective per generation, plus best interlock on a second axis when stacking interlocks. The bound and the block packer's score are drawn as reference lines.
+- **Sensitivity**: re-solves every combination of case-size changes. Each of length, width and height is either left unchanged or moved by one of its own steps, independently of the others.
+  - **Settings table:** each dimension has its own on/off, change type (a fixed amount to 2 decimal places, default 0.20 in / 0.50 cm, or a percentage, default 2%), step size, and 1–3 steps each way (default 1).
+  - **Opportunities and risks:** plain-language findings computed from the results, so every number can be checked against the table.
+    - **Gains** read as a ladder, from the smallest change that adds cases to the largest gain. Each one says where the gain comes from (more cases per layer, more layers, or both) and flags when max weight rather than space caps it. For example: "If you can reduce the length by 0.25 in (9 → 8.75), the pallet holds 174 cases instead of 168: +6 cases (+4% case density), from 1 more case per layer (Ti 28 → 29)."
+    - **Risks** give, for each dimension, the smallest change that loses cases, i.e. how tight its tolerance must be.
+    - The logic is in `pallet_builder.insights` (`sensitivity_insights`), so it can also feed a future AI-written summary.
+  - **Runs:** (2n+1)³ − 1 for n steps on all three dimensions: 26 at 1 step, up to 342 at 3. A progress bar shows the run. Steps that would take a dimension to zero or below are skipped and listed.
+  - **Results:** for each combination, the change to each dimension ("–" when unchanged), the case size, cases and the change from the base, Ti (cases per layer) and Hi (layers), deck coverage, cube use and interlock. Case counts and percentage columns are drawn as in-cell bars.
+  - **Order:** the base case is highlighted at the top, and the combinations follow, ranked by fitness: most cases, then cube use, interlock and deck coverage.
+
+**Export:** every table can be downloaded as CSV from its own toolbar (hover over the table).
 
 ## Recommendations for future versions
 

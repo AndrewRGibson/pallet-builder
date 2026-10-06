@@ -499,3 +499,38 @@ def test_solver_runs_report_work_and_time():
     assert runs["Genetic algorithm"].iterations == len(runs["Genetic algorithm"].history) - 1
     assert runs["Genetic algorithm"].evaluations > 0
     assert all(run.elapsed_ms >= 0 for run in result.solver_runs)
+
+
+def test_sensitivity_insights_ladder_risks_and_no_gain():
+    from pallet_builder.insights import Variant, sensitivity_insights
+
+    base = Variant(9, 7, 8, cases=168, ti=28, hi=6)
+    variants = [
+        Variant(8.75, 7, 8, cases=174, ti=29, hi=6),    # small gain, smallest change
+        Variant(9, 7, 7.5, cases=196, ti=28, hi=7),     # an extra layer
+        Variant(8.75, 7, 7.5, cases=196, ti=28, hi=7),  # same gain as above with a bigger change: dominated
+        Variant(9.25, 7, 8, cases=162, ti=27, hi=6),    # length up loses a case per layer
+        Variant(9, 7.5, 8, cases=150, ti=25, hi=6),
+    ]
+    insights = sensitivity_insights(base, variants, "in")
+    gains = [i for i in insights if i.kind == "gain"]
+    risks = [i for i in insights if i.kind == "risk"]
+
+    assert [g.variant.cases for g in gains] == [174, 196]  # ladder: smallest change first, dominated dropped
+    assert "reduce the length by 0.25 in (9 \u2192 8.75)" in gains[0].text
+    assert "+6 cases (+4% case density)" in gains[0].text and "Ti 28 \u2192 29" in gains[0].text
+    assert "1 more layer (Hi 6 \u2192 7)" in gains[1].text
+    assert {r.variant.cases for r in risks} == {162, 150}
+    assert any("Watch the length tolerance" in r.text and "loses 6 cases" in r.text for r in risks)
+
+    none = sensitivity_insights(base, [Variant(9.25, 7, 8, cases=162, ti=27, hi=6)], "in")
+    assert none[0].kind == "info" and "No size change" in none[0].text
+
+
+def test_sensitivity_insights_flag_weight_cap():
+    from pallet_builder.insights import Variant, sensitivity_insights
+
+    base = Variant(12, 10, 8, cases=96, ti=16, hi=6)
+    taller_stack = Variant(12, 10, 7.6, cases=110, ti=16, hi=7)  # space for 112, weight caps at 110
+    (gain,) = sensitivity_insights(base, [taller_stack], "in", max_weight=2200, case_weight=20)
+    assert "Max weight caps it at 110; the space would take 112" in gain.text
