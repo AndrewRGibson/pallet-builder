@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import time
 
 import pandas as pd
@@ -31,7 +32,25 @@ _LENGTH_KEYS = ("p_len", "p_wid", "p_deck", "p_height", "c_len", "c_wid", "c_hgt
 # Default fixed sensitivity step per length unit (0.2 in / 0.5 cm) and percentage step.
 DEFAULT_SENS_STEP = {"in": 0.2, "cm": 0.5}
 DEFAULT_SENS_PCT = 2.0
-SENS_FIXED, SENS_PCT = "Fixed amount", "Percent"
+SENS_FIXED, SENS_PCT = "Fixed", "Percent"
+# (label, case_args key) for the dimensions analysed independently.
+SENS_DIMENSIONS = (("Length", "length"), ("Width", "width"), ("Height", "height"))
+
+
+def _default_sens_config(length_unit: str) -> list[dict]:
+    return [
+        {"Dimension": name, "On": True, "By": SENS_FIXED, "Fixed step": DEFAULT_SENS_STEP[length_unit],
+         "Percent step": DEFAULT_SENS_PCT, "Steps": 2}
+        for name, _ in SENS_DIMENSIONS
+    ]
+
+
+def _sens_config() -> list[dict]:
+    """The sensitivity settings with any pending edits from the settings table applied."""
+    config = [dict(row) for row in st.session_state.sens_config]
+    for index, changes in st.session_state.get("sens_editor", {}).get("edited_rows", {}).items():
+        config[int(index)].update(changes)
+    return config
 _WEIGHT_KEYS = ("p_maxw", "c_weight")
 CUSTOM = "Custom"
 STACKING_LABELS = {
@@ -51,12 +70,20 @@ st.markdown(
         section[data-testid="stSidebar"] [data-testid="stVerticalBlock"] { gap: 0.2rem; }
         /* Clear separation between sidebar sections; rows within a section stay compact. */
         section[data-testid="stSidebar"] hr { margin: 1.1rem 0 0.6rem; }
-        section[data-testid="stSidebar"] { min-width: 400px; }
-        /* Compact value boxes: shorter inputs and selects with less vertical padding. */
-        section[data-testid="stSidebar"] [data-baseweb="input"],
-        section[data-testid="stSidebar"] [data-baseweb="select"] > div { min-height: 1.85rem; height: 1.85rem; }
-        section[data-testid="stSidebar"] [data-baseweb="input"] input { padding-top: 0.1rem; padding-bottom: 0.1rem; }
-        section[data-testid="stSidebar"] [data-baseweb="select"] > div > div { padding-top: 0; padding-bottom: 0; }
+        /* !important: Streamlit's own sidebar sizing otherwise wins. */
+        section[data-testid="stSidebar"] { width: 400px !important; min-width: 400px !important; }
+        /* Compact value boxes: 28px number and select boxes (Streamlit's default is 40px). */
+        section[data-testid="stSidebar"] [data-testid="stNumberInputContainer"],
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] > div:last-child > div {
+            height: 28px !important; min-height: 0 !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stNumberInput"] input,
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] input {
+            height: 26px !important; min-height: 0 !important; padding-top: 2px !important; padding-bottom: 2px !important;
+        }
+        section[data-testid="stSidebar"] [data-testid="stSelectbox"] button {
+            height: 26px !important; padding-top: 0 !important; padding-bottom: 0 !important;
+        }
         /* Sidebar properties: label and value on one line. */
         section[data-testid="stSidebar"] [data-testid="stNumberInput"],
         section[data-testid="stSidebar"] [data-testid="stSelectbox"] {
@@ -131,12 +158,15 @@ def _convert_units() -> None:
     scale("p_maxarea", factor**2)
     for key in _WEIGHT_KEYS:
         scale(key, WEIGHT_UNITS[old_weight] / WEIGHT_UNITS[new_weight])
-    # Keep the sensitivity step on the round default for the new system unless the user changed it.
-    step = st.session_state.sens_step
-    if abs(step - DEFAULT_SENS_STEP[old_length]) < 1e-9:
-        st.session_state.sens_step = DEFAULT_SENS_STEP[new_length]
-    else:
-        st.session_state.sens_step = _round(convert_length(step, old_length, new_length))
+    # Convert fixed sensitivity steps, keeping the round default (0.2 in / 0.5 cm) where unchanged.
+    config = _sens_config()
+    for row in config:
+        if abs(row["Fixed step"] - DEFAULT_SENS_STEP[old_length]) < 1e-9:
+            row["Fixed step"] = DEFAULT_SENS_STEP[new_length]
+        else:
+            row["Fixed step"] = _round(convert_length(row["Fixed step"], old_length, new_length))
+    st.session_state.sens_config = config
+    st.session_state.pop("sens_editor", None)  # the table restarts from the converted settings
     st.session_state._units_prev = st.session_state.units
 
 
@@ -167,10 +197,7 @@ def _init_state() -> None:
         ga_pop=24,
         ga_seed=0,
         sens_on=True,
-        sens_mode=SENS_FIXED,
-        sens_step=DEFAULT_SENS_STEP["in"],
-        sens_pct=DEFAULT_SENS_PCT,
-        sens_steps=1,
+        sens_config=_default_sens_config("in"),
     )
     _apply_preset()
 
@@ -491,54 +518,129 @@ def _excel_bytes(sheets: dict[str, list[dict]]) -> bytes:
     return buffer.getvalue()
 
 
-_SENS_DIMENSIONS = (("Length", ("length",)), ("Width", ("width",)), ("Height", ("height",)),
-                    ("All three", ("length", "width", "height")))
+def _sens_row(dimension: str, step: int, change: str, case_args: dict, count: int, result, base_count: int) -> dict:
+    stacked = result.layers >= 2 and result.stacking != "column"
+    return {
+        "Dimension": dimension,
+        "Step": step,
+        "Change": change,
+        "Case size": f"{case_args['length']:g} \u00d7 {case_args['width']:g} \u00d7 {case_args['height']:g}",
+        "Cases": count,
+        "\u0394 cases": count - base_count,
+        "Ti": result.cases_per_layer if count else 0,
+        "Hi": result.layers if count else 0,
+        "Deck coverage (%)": round(result.utilization * 100, 1),
+        "Cube use (%)": round(result.volume_utilization * 100, 1),
+        "Interlock (%)": round(result.interlock * 100, 1) if stacked else None,
+    }
 
 
-def _sensitivity(solve, case_args: dict, base_count: int, fixed: bool, amount: float, steps: int,
-                 unit: str) -> tuple[list[dict], list[str]]:
-    """Case counts with each dimension (and all three) changed by +/- ``steps`` x ``amount``.
+def _fitness(row: dict) -> tuple:
+    """Rank variants: most cases, then cube use, interlock and deck coverage."""
+    return (row["Cases"], row["Cube use (%)"], row["Interlock (%)"] or 0.0, row["Deck coverage (%)"])
 
-    ``solve(case_args)`` returns the case count for a variant. Returns one row per dimension and the
-    ordered column labels; variants that would make a dimension non-positive are left blank.
+
+# Smallest case dimension a variant may have (matches the sidebar's minimum case size).
+MIN_CASE_DIMENSION = 0.001
+
+
+def _clean_sens_settings(settings: dict, length_unit: str) -> dict:
+    """Coerce one dimension's settings to sensible values: positive steps, 0.1-50%, 1-5 steps."""
+
+    def number(value, default: float) -> float:
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return default
+        return value if math.isfinite(value) else default  # NaN or infinity -> default
+
+    return {
+        **settings,
+        "On": bool(settings.get("On")),
+        "By": settings.get("By") if settings.get("By") in (SENS_FIXED, SENS_PCT) else SENS_FIXED,
+        "Fixed step": max(abs(number(settings.get("Fixed step"), DEFAULT_SENS_STEP[length_unit])), MIN_CASE_DIMENSION),
+        "Percent step": min(max(abs(number(settings.get("Percent step"), DEFAULT_SENS_PCT)), 0.1), 50.0),
+        "Steps": int(min(max(round(number(settings.get("Steps"), 2)), 1), 5)),
+    }
+
+
+def _sensitivity(solve, case_args: dict, base: tuple, config: list[dict], unit: str) -> tuple[list[dict], list[str]]:
+    """Re-solve with each enabled dimension changed independently, per its own step settings.
+
+    ``solve(case_args)`` returns (count, result). Returns the base row first, then the variants
+    ranked by fitness (descending), plus a note for every variant skipped because it would take a
+    dimension below the minimum case size (so nothing is ever zero or negative).
     """
-    offsets = [k for k in range(-steps, steps + 1)]
-    labels = [("Base" if k == 0 else (f"{k * amount:+g} {unit}" if fixed else f"{k * amount:+g}%")) for k in offsets]
-    rows = []
-    for name, keys in _SENS_DIMENSIONS:
-        row: dict = {"Dimension": name}
-        for k, label in zip(offsets, labels):
+    base_count, base_result = base
+    rows, skipped = [], []
+    for settings, (name, key) in zip(config, SENS_DIMENSIONS):
+        settings = _clean_sens_settings(settings, unit)
+        if not settings["On"]:
+            continue
+        fixed = settings["By"] == SENS_FIXED
+        amount = settings["Fixed step"] if fixed else settings["Percent step"]
+        for k in range(-settings["Steps"], settings["Steps"] + 1):
             if k == 0:
-                row[label] = base_count
                 continue
-            variant = dict(case_args)
-            for key in keys:
-                variant[key] = round(case_args[key] + k * amount if fixed else case_args[key] * (1 + k * amount / 100), 6)
-            row[label] = solve(variant) if all(variant[key] > 0 for key in keys) else None
-        rows.append(row)
-    return rows, labels
+            change = f"{k * amount:+g} {unit}" if fixed else f"{k * amount:+g}%"
+            value = round(case_args[key] + k * amount if fixed else case_args[key] * (1 + k * amount / 100), 6)
+            if value < MIN_CASE_DIMENSION:
+                skipped.append(f"{name} {change} (would make the {key} {value:g} {unit})")
+                continue
+            variant = {**case_args, key: value}
+            count, result = solve(variant)
+            rows.append(_sens_row(name, k, change, variant, count, result, base_count))
+    rows.sort(key=_fitness, reverse=True)
+    return [_sens_row("Base", 0, "\u2013", case_args, base_count, base_result, base_count), *rows], skipped
 
 
-def _render_sensitivity(rows: list[dict], labels: list[str], base_count: int, unit: str) -> None:
-    def shade(value):
-        if value is None or pd.isna(value) or value == base_count:
+_SENS_COLUMNS = {
+    "Dimension": st.column_config.TextColumn(pinned=True),
+    "Step": st.column_config.NumberColumn(format="%+d", alignment="right", help="Steps from the base case"),
+    "Change": st.column_config.TextColumn(pinned=True),
+    "Case size": st.column_config.TextColumn(),
+    # "Cases" becomes an in-cell bar scaled to the largest variant (set in _render_sensitivity).
+    "Cases": st.column_config.NumberColumn(format="localized", alignment="right"),
+    "\u0394 cases": st.column_config.NumberColumn(format="%+d", alignment="right"),
+    "Ti": st.column_config.NumberColumn(format="localized", alignment="right", help="Cases per layer"),
+    "Hi": st.column_config.NumberColumn(format="localized", alignment="right", help="Layers"),
+    # In-cell bars make the shifts easy to compare down the ranking.
+    "Deck coverage (%)": st.column_config.ProgressColumn("Deck coverage", format="%.1f%%", min_value=0, max_value=100),
+    "Cube use (%)": st.column_config.ProgressColumn("Cube use", format="%.1f%%", min_value=0, max_value=100),
+    "Interlock (%)": st.column_config.ProgressColumn("Interlock", format="%.0f%%", min_value=0, max_value=100),
+}
+
+_SENS_EDITOR_COLUMNS = {
+    "Dimension": st.column_config.TextColumn(disabled=True),
+    "On": st.column_config.CheckboxColumn(),
+    "By": st.column_config.SelectboxColumn(options=[SENS_FIXED, SENS_PCT], required=True),
+    "Fixed step": st.column_config.NumberColumn(min_value=0.001, step=0.1, format="%g", required=True),
+    "Percent step": st.column_config.NumberColumn(min_value=0.1, max_value=50.0, step=0.5, format="%g%%", required=True),
+    "Steps": st.column_config.NumberColumn("Steps each way", min_value=1, max_value=5, step=1, format="%d",
+                                           required=True),
+}
+
+
+def _render_sensitivity(rows: list[dict]) -> None:
+    frame = pd.DataFrame(rows)
+
+    def highlight(row):
+        if row.name == 0:  # the base case is always the first row
+            return ["background-color: #dbeafe; font-weight: 700"] * len(row)
+        return [""] * len(row)
+
+    def delta_color(value):
+        if pd.isna(value) or value == 0:
             return ""
-        return "background-color: #dcfce7; color: #166534" if value > base_count else \
-            "background-color: #fee2e2; color: #991b1b"
+        return "color: #166534; font-weight: 600" if value > 0 else "color: #991b1b; font-weight: 600"
 
-    frame = pd.DataFrame(rows).set_index("Dimension")[labels]
-    st.dataframe(frame.style.map(shade).format("{:.0f}", na_rep="\u2013"), width="content")
-    fig = go.Figure()
-    for row in rows:
-        fig.add_scatter(x=labels, y=[row[label] for label in labels], mode="lines+markers", name=row["Dimension"])
-    fig.add_hline(y=base_count, line={"color": "#94a3b8", "dash": "dash"}, annotation_text="base",
-                  annotation_position="top left")
-    fig.update_layout(height=260, margin={"l": 0, "r": 0, "t": 10, "b": 0}, yaxis_title="Cases",
-                      xaxis_title=f"Change in case size ({unit} or %)", legend={"orientation": "h", "y": -0.3})
-    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
-    st.caption("Each variant is a full re-solve with the same pallet, stacking and solver settings. Green = more "
-               "cases than the base, red = fewer. Useful for spotting sizes near a threshold, where a small "
-               "change in packaging adds or loses a row, column or layer.")
+    styled = frame.style.apply(highlight, axis=1).map(delta_color, subset=["\u0394 cases"])
+    columns = {**_SENS_COLUMNS, "Cases": st.column_config.ProgressColumn(
+        "Cases", format="%d", min_value=0, max_value=max(int(frame["Cases"].max()), 1))}
+    st.dataframe(styled, hide_index=True, width="stretch", height=min(38 + 35 * len(frame), 420),
+                 column_config=columns)
+    st.caption("Base case highlighted; variants ranked by fitness: most cases, then cube use, interlock and deck "
+               "coverage. Each variant is a full re-solve with the same pallet, stacking and solver settings.")
 
 
 # --- Sidebar: every input that controls the solve ------------------------------------------
@@ -602,17 +704,6 @@ with st.sidebar:
     st.number_input("Population", key="ga_pop", min_value=4, max_value=200, step=1, disabled=ga_off)
     st.number_input("Seed", key="ga_seed", min_value=0, step=1, disabled=ga_off)
 
-    st.divider()
-    _section("Sensitivity")
-    st.toggle("Case size sensitivity", key="sens_on",
-              help="Re-solve with each case dimension (and all three together) increased and reduced.")
-    sens_off = not st.session_state.sens_on
-    st.selectbox("Change by", [SENS_FIXED, SENS_PCT], key="sens_mode", disabled=sens_off)
-    st.number_input(f"Step ({p_unit})", key="sens_step", min_value=0.001, step=0.1, format="%g",
-                    disabled=sens_off or st.session_state.sens_mode != SENS_FIXED)
-    st.number_input("Step (%)", key="sens_pct", min_value=0.1, max_value=50.0, step=0.5, format="%g",
-                    disabled=sens_off or st.session_state.sens_mode != SENS_PCT)
-    st.number_input("Steps each way", key="sens_steps", min_value=1, max_value=5, step=1, disabled=sens_off)
 
 ss = st.session_state
 ga_args = (ss.ga_gens, ss.ga_pop, ss.ga_seed) if ss.ga_on else None
@@ -666,16 +757,6 @@ st.caption(
     f"case {ss.c_len:g}×{ss.c_wid:g}×{ss.c_hgt:g} {p_unit}"
 )
 
-sens_rows: list[dict] = []
-sens_labels: list[str] = []
-if ss.sens_on and count:
-    fixed = ss.sens_mode == SENS_FIXED
-    with st.spinner("Running sensitivity\u2026"):
-        sens_rows, sens_labels = _sensitivity(
-            lambda variant: _solve(pallet_args, variant, ga_args, ss.stacking, min_support)[0],
-            case_args, count, fixed, ss.sens_step if fixed else ss.sens_pct, ss.sens_steps, p_unit,
-        )
-
 placement_rows = _placement_rows(result)
 view_col, info_col = st.columns(2, gap="large")
 with view_col:
@@ -685,6 +766,29 @@ with view_col:
             _render_3d(pallet, result)
         else:
             st.info("Nothing to draw. Adjust the inputs in the sidebar.")
+    sens_rows: list[dict] = []
+    sens_skipped: list[str] = []
+    with sens_tab:
+        st.toggle("Run case size sensitivity", key="sens_on",
+                  help="Re-solve with each case dimension increased and reduced, independently.")
+        edited = st.data_editor(pd.DataFrame(ss.sens_config), key="sens_editor", hide_index=True, width="stretch",
+                                column_config={**_SENS_EDITOR_COLUMNS, "Fixed step": {
+                                    **_SENS_EDITOR_COLUMNS["Fixed step"], "label": f"Fixed step ({p_unit})"}},
+                                disabled=not ss.sens_on, num_rows="fixed")
+        if ss.sens_on and count:
+            with st.spinner("Running sensitivity\u2026"):
+                sens_rows, sens_skipped = _sensitivity(
+                    lambda variant: _solve(pallet_args, variant, ga_args, ss.stacking, min_support)[:2],
+                    case_args, (count, result), edited.to_dict("records"), p_unit,
+                )
+            if len(sens_rows) > 1:
+                _render_sensitivity(sens_rows)
+                if sens_skipped:
+                    st.caption("Skipped (a case dimension can't be zero or negative): " + "; ".join(sens_skipped) + ".")
+            else:
+                st.info("Turn on at least one dimension above.")
+        elif ss.sens_on:
+            st.info("No cases fit the base case, so there's nothing to compare against.")
     with table_tab:
         st.dataframe(placement_rows, hide_index=True, width="content", height=380)
         settings = {
@@ -724,11 +828,6 @@ with view_col:
                            mime="application/json", width="stretch")
         st.caption("CSV is this placement grid. Excel adds Summary, Solver runs, GA history and Sensitivity "
                    "sheets; JSON has everything, including the inputs, so a run can be reproduced later.")
-    with sens_tab:
-        if sens_rows:
-            _render_sensitivity(sens_rows, sens_labels, count, p_unit)
-        else:
-            st.info("Turn on case size sensitivity in the sidebar (and make sure at least one case fits).")
 
 with info_col:
     summary_tab, iterations_tab = st.tabs(["Summary", "By iteration"])

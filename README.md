@@ -286,7 +286,6 @@ The app finds the most cases that fit and re-solves whenever an input changes. E
   - Stacking: interlock when possible, column, or no column stacking; plus the minimum support.
   - The GA layer search switch, with its generations, population and seed.
   - Settings that don't apply are greyed out rather than hidden, so their values are kept.
-- **Sensitivity**: re-solves with case length, width and height (each alone, then all three together) increased and reduced. Steps are a fixed amount (default 0.2 in / 0.5 cm) or a percentage (default 2%), with 1–5 steps each way.
 
 The results area is split 50:50 between the 3D view and the results:
 
@@ -299,7 +298,10 @@ The results area is split 50:50 between the 3D view and the results:
   - When the GA runs, a chart of its best and mean objective per generation, plus best interlock on a second axis when stacking interlocks. The bound and the block packer's score are drawn as reference lines.
 - **Tabs**:
   - **Placements**: the layer, pattern (A or flipped B), x/y/z and size for each case. Columns fit their content.
-  - **Sensitivity**: case counts for each size change. Gains are green and losses red, with a chart against the base.
+  - **Sensitivity**: re-solves with case length, width and height changed independently.
+    - **Settings table:** each dimension has its own on/off, change type (a fixed amount, default 0.2 in / 0.5 cm, or a percentage, default 2%), step size, and 1–5 steps each way.
+    - **Results:** for each variant, the case size, cases and the change from the base, Ti (cases per layer) and Hi (layers), deck coverage, cube use and interlock. The percentage columns and case counts are drawn as in-cell bars.
+    - **Order:** the base case is highlighted at the top, and the variants follow, ranked by fitness: most cases, then cube use, interlock and deck coverage.
   - **Export**:
     - **Excel**: Summary, Placements, Solver runs, GA history and Sensitivity sheets.
     - **CSV**: the placement grid.
